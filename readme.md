@@ -8,4 +8,11 @@ suppose you usually use some social media platform. you talk to *most* of your f
 
 ## proposed soln
 
-have web scrapers programatically scrape your social media message feeds. users will manually connect each feed that they want to centralize (you provide your current login information or cookies). you will 
+have web scrapers programatically scrape your social media message feeds. users will manually connect each feed that they want to centralize (you provide your current login information or cookies). web scrapers will monitor each channel for new information and will convert it into a standardized format to be sent to the user.
+
+when users want to perform actions like sending messages, replying to messages, adding reactions, these will also be standardized. the possible actions in the app can be described as the intersection of all possible actions on the various platforms (ie. a feature available exclusively on one platform cannot be generalized for providence, and will not be included in the standardized sent message format).
+
+## implementation
+
+frontend with expo, backend with express.
+scraping done with playwright + custom built chromium to prevent automation detection.
