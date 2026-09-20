@@ -220,8 +220,6 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         const image = anchor.querySelector("img") as HTMLImageElement | null;
         const text = anchor.textContent || label;
         const participantCount = text.match(/\b(\d+)\s+members?\b/i)?.[1];
-        const presence = label.match(/,\s*(online|idle|offline|invisible|do not disturb)(?=\s*,|\s*$)/i)?.[1]
-          ?.toLowerCase();
         return [{
           channelId: match[1],
           path,
@@ -231,15 +229,6 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
             ? "group" as const
             : "direct" as const,
           unread: /\bunread\b/i.test(label),
-          muted: /\bmuted\b/i.test(label),
-          participantCount: participantCount ? Number.parseInt(participantCount, 10) : undefined,
-          presence: presence === "do not disturb"
-            ? "do_not_disturb" as const
-            : presence === "online" || presence === "idle"
-              ? presence
-              : presence === "offline" || presence === "invisible"
-                ? "offline" as const
-                : undefined,
         }];
       }),
     );
@@ -254,9 +243,6 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         kind: link.kind,
         avatarUrl: link.avatarUrl,
         unread: link.unread,
-        muted: link.muted,
-        participantCount: link.participantCount,
-        presence: link.presence as Conversation["presence"],
         path: link.path,
       });
     }

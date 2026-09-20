@@ -2,12 +2,18 @@ import { EventEmitter } from "node:events";
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { AppError, errorMessage } from "./errors.js";
-import type { MessageProvider, ProvidenceEvent } from "./types.js";
+import type { MessageProvider, ProvidenceEvent, ProviderName } from "./types.js";
 
 type EventProvider = MessageProvider & EventEmitter;
 type AsyncHandler = (request: Request, response: Response, next: NextFunction) => Promise<void>;
 
-export function createApp(provider: EventProvider, frontendOrigin = "*") {
+export function createApp(providerInput: EventProvider | readonly EventProvider[], frontendOrigin = "*") {
+  const providers = Array.isArray(providerInput) ? [...providerInput] : [providerInput];
+  const providerByName = new Map(providers.map((provider) => [provider.name, provider]));
+  if (providerByName.size !== providers.length) {
+    throw new AppError("Only one instance of each provider may be registered", 500, "CONFIG_ERROR");
+  }
+
   const app = express();
   app.disable("x-powered-by");
   app.use(cors({ origin: frontendOrigin === "*" ? "*" : frontendOrigin.split(",").map((origin) => origin.trim()) }));
@@ -19,20 +25,22 @@ export function createApp(provider: EventProvider, frontendOrigin = "*") {
   });
 
   app.get("/health", (_request, response) => {
-    const providerStatus = provider.status();
+    const statuses = providers.map((provider) => ({ name: provider.name, ...provider.status() }));
     response.json({
-      status: providerStatus.state === "connected" ? "ok" : "degraded",
-      provider: { name: provider.name, ...providerStatus },
+      status: statuses.every(({ state }) => state === "connected") ? "ok" : "degraded",
+      providers: statuses,
     });
   });
 
   app.get("/api/providers", (_request, response) => {
-    response.json({ providers: [{ name: provider.name, ...provider.status() }] });
+    response.json({ providers: providers.map((provider) => ({ name: provider.name, ...provider.status() })) });
   });
 
   app.post(
-    "/api/providers/discord/connect",
-    asyncRoute(async (_request, response) => {
+    "/api/providers/:provider/connect",
+    asyncRoute(async (request, response) => {
+      const provider = providerByName.get(requiredProviderName(request.params.provider));
+      if (!provider) throw new AppError("Provider is not configured", 404, "PROVIDER_NOT_FOUND");
       await provider.connect();
       response.json({ provider: { name: provider.name, ...provider.status() } });
     }),
@@ -41,7 +49,9 @@ export function createApp(provider: EventProvider, frontendOrigin = "*") {
   app.get(
     "/api/conversations",
     asyncRoute(async (_request, response) => {
-      response.json({ conversations: await provider.listConversations() });
+      const connected = providers.filter((provider) => provider.status().state === "connected");
+      const conversationLists = await Promise.all(connected.map((provider) => provider.listConversations()));
+      response.json({ conversations: conversationLists.flat() });
     }),
   );
 
@@ -54,6 +64,7 @@ export function createApp(provider: EventProvider, frontendOrigin = "*") {
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
         throw new AppError("limit must be an integer from 1 to 100", 400, "INVALID_REQUEST");
       }
+      const provider = providerForQualifiedId(providerByName, conversationId);
       response.json({ messages: await provider.listMessages(conversationId, limit) });
     }),
   );
@@ -63,9 +74,10 @@ export function createApp(provider: EventProvider, frontendOrigin = "*") {
     asyncRoute(async (request, response) => {
       const conversationId = requiredParam(request.params.conversationId, "conversationId");
       const content = typeof request.body?.content === "string" ? request.body.content.trim() : "";
-      if (!content || content.length > 2_000) {
-        throw new AppError("content must contain 1 to 2000 characters", 400, "INVALID_REQUEST");
+      if (!content || content.length > 1_000) {
+        throw new AppError("content must contain 1 to 1000 characters", 400, "INVALID_REQUEST");
       }
+      const provider = providerForQualifiedId(providerByName, conversationId);
       const message = await provider.sendMessage(conversationId, { content });
       response.status(201).json({ message });
     }),
@@ -80,6 +92,7 @@ export function createApp(provider: EventProvider, frontendOrigin = "*") {
       if (!emoji || emoji.length > 100) {
         throw new AppError("emoji is required", 400, "INVALID_REQUEST");
       }
+      const provider = providerForQualifiedId(providerByName, conversationId);
       await provider.addReaction(conversationId, messageId, emoji);
       response.status(204).end();
     }),
@@ -97,12 +110,14 @@ export function createApp(provider: EventProvider, frontendOrigin = "*") {
     };
     const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
     heartbeat.unref();
-    provider.on("event", writeEvent);
-    response.write(`event: ready\ndata: ${JSON.stringify({ provider: provider.status() })}\n\n`);
+    for (const provider of providers) provider.on("event", writeEvent);
+    response.write(`event: ready\ndata: ${JSON.stringify({
+      providers: providers.map((provider) => ({ name: provider.name, ...provider.status() })),
+    })}\n\n`);
 
     request.on("close", () => {
       clearInterval(heartbeat);
-      provider.off("event", writeEvent);
+      for (const provider of providers) provider.off("event", writeEvent);
     });
   });
 
@@ -115,6 +130,27 @@ export function createApp(provider: EventProvider, frontendOrigin = "*") {
   });
 
   return app;
+}
+
+function providerForQualifiedId(
+  providers: ReadonlyMap<ProviderName, EventProvider>,
+  qualifiedId: string,
+): EventProvider {
+  const providerName = qualifiedId.split(":", 1)[0];
+  if (providerName !== "discord" && providerName !== "instagram") {
+    throw new AppError("ID must be qualified with a configured provider", 400, "INVALID_PROVIDER_ID");
+  }
+  const provider = providers.get(providerName);
+  if (!provider) throw new AppError("Provider is not configured", 404, "PROVIDER_NOT_FOUND");
+  return provider;
+}
+
+function requiredProviderName(value: string | string[] | undefined): ProviderName {
+  const parsed = requiredParam(value, "provider");
+  if (parsed !== "discord" && parsed !== "instagram") {
+    throw new AppError("Unknown provider", 404, "PROVIDER_NOT_FOUND");
+  }
+  return parsed;
 }
 
 function asyncRoute(handler: AsyncHandler) {

@@ -13,10 +13,8 @@ const backendDirectory = [
 ].find((candidate) => fs.existsSync(path.join(candidate, "package.json"))) ?? process.cwd();
 dotenv.config({ path: path.join(backendDirectory, ".env"), quiet: true });
 
-function required(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new AppError(`Missing required environment variable ${name}`, 500, "CONFIG_ERROR");
-  return value;
+function optional(name: string): string | undefined {
+  return process.env[name]?.trim() || undefined;
 }
 
 function integer(name: string, fallback: number): number {
@@ -29,11 +27,36 @@ function integer(name: string, fallback: number): number {
 export const config = {
   host: process.env.HOST?.trim() || "127.0.0.1",
   port: integer("PORT", 3001),
-  discordEmail: required("DISCORD_EMAIL"),
-  discordPassword: required("DISCORD_PASSWORD"),
+  discordEmail: optional("DISCORD_EMAIL"),
+  discordPassword: optional("DISCORD_PASSWORD"),
+  instagramEmail: optional("INSTAGRAM_EMAIL"),
+  instagramPassword: optional("INSTAGRAM_PASSWORD"),
   customChromiumPath: process.env.CUSTOM_CHROMIUM_PATH?.trim() || undefined,
-  userDataDir: path.resolve(backendDirectory, process.env.USER_DATA_DIR?.trim() || "user-data"),
+  discordUserDataDir: path.resolve(
+    backendDirectory,
+    process.env.DISCORD_USER_DATA_DIR?.trim() || process.env.USER_DATA_DIR?.trim() || "user-data",
+  ),
+  instagramUserDataDir: path.resolve(
+    backendDirectory,
+    process.env.INSTAGRAM_USER_DATA_DIR?.trim() || "instagram-user-data",
+  ),
   headless: process.env.HEADLESS === "true",
   pollIntervalMs: integer("POLL_INTERVAL_MS", 5_000),
   frontendOrigin: process.env.FRONTEND_ORIGIN?.trim() || "*",
 };
+
+export function configuredCredentials(
+  provider: "Discord" | "Instagram",
+  email: string | undefined,
+  password: string | undefined,
+): { email: string; password: string } | undefined {
+  if (!email && !password) return undefined;
+  if (!email || !password) {
+    throw new AppError(
+      `${provider} requires both its email and password environment variables`,
+      500,
+      "CONFIG_ERROR",
+    );
+  }
+  return { email, password };
+}
