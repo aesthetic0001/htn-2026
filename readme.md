@@ -16,3 +16,16 @@ when users want to perform actions like sending messages, replying to messages, 
 
 frontend with expo, backend with express.
 scraping done with playwright + custom built chromium to prevent automation detection.
+
+## roadmap
+
+- add muting, notifications, 
+- add profile merging (ie. one contact is found on several providers, we will merge their messages into one giant provider, sending to either their most frequented provider OR a user configured override)
+- clean up the ui
+
+
+## if there's time...
+
+- add user authentication
+- add per-user data storage on an actual db rather than locally
+- add ai message preprocessing routines
