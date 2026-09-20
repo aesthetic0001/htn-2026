@@ -2,22 +2,21 @@ import { createServer } from "node:http";
 import { createApp } from "./src/app.js";
 import { config, configuredCredentials } from "./src/config.js";
 import { DiscordProvider } from "./src/discord-provider.js";
-import { AppError } from "./src/errors.js";
 import { InstagramProvider } from "./src/instagram-provider.js";
 
 const providers: Array<DiscordProvider | InstagramProvider> = [];
 const discordCredentials = configuredCredentials("Discord", config.discordEmail, config.discordPassword);
 const instagramCredentials = configuredCredentials("Instagram", config.instagramEmail, config.instagramPassword);
 
-if (discordCredentials) {
-  providers.push(new DiscordProvider({
-    ...discordCredentials,
-    userDataDir: config.discordUserDataDir,
-    executablePath: config.customChromiumPath,
-    headless: config.headless,
-    pollIntervalMs: config.pollIntervalMs,
-  }));
-}
+// if (discordCredentials) {
+//   providers.push(new DiscordProvider({
+//     ...discordCredentials,
+//     userDataDir: config.discordUserDataDir,
+//     executablePath: config.customChromiumPath,
+//     headless: config.headless,
+//     pollIntervalMs: config.pollIntervalMs,
+//   }));
+// }
 
 if (instagramCredentials) {
   providers.push(new InstagramProvider({
@@ -27,14 +26,6 @@ if (instagramCredentials) {
     headless: config.headless,
     pollIntervalMs: config.pollIntervalMs,
   }));
-}
-
-if (providers.length === 0) {
-  throw new AppError(
-    "Configure credentials for at least one provider (Discord or Instagram)",
-    500,
-    "CONFIG_ERROR",
-  );
 }
 
 const server = createServer(createApp(providers, config.frontendOrigin));

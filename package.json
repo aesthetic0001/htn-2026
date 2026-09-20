@@ -1,0 +1,12 @@
+{
+  "name": "providence",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run start",
+    "build": "npm --prefix backend run build && npm --prefix frontend run typecheck",
+    "test": "npm --prefix backend test && npm --prefix frontend run lint && npm --prefix frontend run typecheck"
+  }
+}

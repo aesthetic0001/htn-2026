@@ -16,7 +16,7 @@ npm run build
 npm start
 ```
 
-Configure at least one complete credential pair:
+Configure at least one complete credential pair to load messages:
 
 - `DISCORD_EMAIL` and `DISCORD_PASSWORD`
 - `INSTAGRAM_EMAIL` and `INSTAGRAM_PASSWORD`
@@ -32,6 +32,8 @@ Optional variables:
 - `HEADLESS`: defaults to `false`
 - `FRONTEND_ORIGIN`: comma-separated CORS origins; defaults to `*`
 - `POLL_INTERVAL_MS`: watched-conversation polling interval; defaults to `5000`
+
+The API can start without credentials so the frontend can display its setup state, but no providers or conversations will be available until credentials are configured and the backend is restarted.
 
 If a provider requests CAPTCHA, MFA, or a login challenge, complete it in the opened browser and reconnect. Each authenticated profile is retained in its own user-data directory for later starts. Do not point both providers at the same directory.
 

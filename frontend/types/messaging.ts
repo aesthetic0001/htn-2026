@@ -1,4 +1,12 @@
-export type ProviderName = 'discord' | 'instagram' | 'messenger' | 'slack';
+export type ProviderName = 'discord' | 'instagram';
+
+export type ProviderState = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+export interface ProviderStatus {
+  name: ProviderName;
+  state: ProviderState;
+  detail?: string;
+}
 
 export interface Participant {
   id?: string;
@@ -11,8 +19,7 @@ export interface Conversation {
   provider: ProviderName;
   providerConversationId: string;
   title: string;
-  kind: 'direct' | 'group' | 'channel';
-  guild?: string;
+  kind: 'direct' | 'group';
   avatarUrl?: string;
   unread: boolean;
 }

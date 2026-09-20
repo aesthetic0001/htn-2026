@@ -343,6 +343,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
         providerMessageId,
         conversationId,
         author: {
+          ...(raw.author === "You" ? { id: "me" } : {}),
           displayName: raw.author,
           ...(raw.avatarUrl ? { avatarUrl: raw.avatarUrl } : {}),
         },
