@@ -7,6 +7,7 @@ import {
 
 const conversationId = "discord:123456789012345678";
 const messageId = "175928847299117063";
+const nextMessageId = "175928847299117064";
 
 function raw(overrides: Partial<RawDiscordMessage> = {}): RawDiscordMessage {
   return {
@@ -61,4 +62,35 @@ test("derives a stable timestamp from the Discord snowflake when the DOM omits i
   ], conversationId, 50);
 
   assert.equal(message?.sentAt, "2016-04-30T11:18:25.796Z");
+});
+
+test("inherits author and avatar for Discord continuation messages", () => {
+  const messages = normalizeDiscordMessages([
+    raw({ avatarUrl: "https://cdn.discordapp.com/ada.png" }),
+    raw({
+      id: nextMessageId,
+      author: undefined,
+      avatarUrl: undefined,
+      content: "a consecutive message",
+    }),
+  ], conversationId, 50);
+
+  assert.deepEqual(messages[1]?.author, {
+    displayName: "Ada",
+    avatarUrl: "https://cdn.discordapp.com/ada.png",
+  });
+});
+
+test("does not leak the previous avatar onto a newly named speaker", () => {
+  const messages = normalizeDiscordMessages([
+    raw({ avatarUrl: "https://cdn.discordapp.com/ada.png" }),
+    raw({
+      id: nextMessageId,
+      author: "Grace",
+      avatarUrl: undefined,
+      content: "new speaker",
+    }),
+  ], conversationId, 50);
+
+  assert.deepEqual(messages[1]?.author, { displayName: "Grace" });
 });

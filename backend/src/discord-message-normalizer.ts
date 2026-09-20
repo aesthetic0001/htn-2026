@@ -27,7 +27,7 @@ export function normalizeDiscordMessages(
     unique.set(raw.id, existing ? mergeRawMessages(existing, raw) : raw);
   }
 
-  return [...unique.values()]
+  return inheritContinuationAuthors([...unique.values()])
     .filter(hasMessagePayload)
     .slice(-limit)
     .map((raw) => ({
@@ -45,6 +45,32 @@ export function normalizeDiscordMessages(
       attachments: raw.attachments,
       reactions: raw.reactions,
     }));
+}
+
+function inheritContinuationAuthors(messages: RawDiscordMessage[]): RawDiscordMessage[] {
+  const avatarsByAuthor = new Map<string, string>();
+  let previousAuthor: string | undefined;
+  let previousAvatarUrl: string | undefined;
+
+  return messages.map((message) => {
+    const author = message.author?.trim();
+    if (!author) {
+      return {
+        ...message,
+        author: previousAuthor,
+        avatarUrl: message.avatarUrl || previousAvatarUrl,
+      };
+    }
+
+    const avatarUrl = message.avatarUrl
+      || (author === previousAuthor ? previousAvatarUrl : undefined)
+      || avatarsByAuthor.get(author);
+    if (avatarUrl) avatarsByAuthor.set(author, avatarUrl);
+    previousAuthor = author;
+    previousAvatarUrl = avatarUrl;
+
+    return { ...message, author, avatarUrl };
+  });
 }
 
 function hasMessagePayload(message: RawDiscordMessage): boolean {
