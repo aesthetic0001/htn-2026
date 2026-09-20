@@ -11,6 +11,11 @@ export interface RawDiscordMessage {
   reactions: Array<{ emoji: string; count?: number }>;
 }
 
+export interface DiscordUserIdentity {
+  displayName?: string;
+  avatarUrl?: string;
+}
+
 const DISCORD_EPOCH_MS = 1_420_070_400_000n;
 const DISCORD_SNOWFLAKE = /^\d{15,25}$/;
 
@@ -18,6 +23,7 @@ export function normalizeDiscordMessages(
   rawMessages: RawDiscordMessage[],
   conversationId: string,
   limit: number,
+  currentUser?: DiscordUserIdentity,
 ): Message[] {
   const unique = new Map<string, RawDiscordMessage>();
 
@@ -30,21 +36,61 @@ export function normalizeDiscordMessages(
   return inheritContinuationAuthors([...unique.values()])
     .filter(hasMessagePayload)
     .slice(-limit)
-    .map((raw) => ({
-      id: `discord:${raw.id}`,
-      provider: "discord",
-      providerMessageId: raw.id,
-      conversationId,
-      author: {
-        displayName: raw.author?.trim() || "Unknown Discord user",
-        ...(raw.avatarUrl ? { avatarUrl: raw.avatarUrl } : {}),
-      },
-      content: raw.content,
-      sentAt: validTimestamp(raw.timestamp) ?? timestampFromSnowflake(raw.id),
-      edited: raw.edited,
-      attachments: raw.attachments,
-      reactions: raw.reactions,
-    }));
+    .map((raw) => {
+      const mine = isCurrentDiscordUser(raw, currentUser);
+      return {
+        id: `discord:${raw.id}`,
+        provider: "discord",
+        providerMessageId: raw.id,
+        conversationId,
+        author: {
+          ...(mine ? { id: "me" } : {}),
+          displayName: raw.author?.trim() || "Unknown Discord user",
+          ...(raw.avatarUrl ? { avatarUrl: raw.avatarUrl } : {}),
+        },
+        content: raw.content,
+        sentAt: validTimestamp(raw.timestamp) ?? timestampFromSnowflake(raw.id),
+        edited: raw.edited,
+        attachments: raw.attachments,
+        reactions: raw.reactions,
+      } satisfies Message;
+    });
+}
+
+export function discordUserIdFromAvatarUrl(avatarUrl?: string): string | undefined {
+  if (!avatarUrl) return undefined;
+  try {
+    return new URL(avatarUrl).pathname.match(/^\/avatars\/(\d+)\//)?.[1];
+  } catch {
+    return avatarUrl.match(/(?:^|\/)avatars\/(\d+)\//)?.[1];
+  }
+}
+
+function isCurrentDiscordUser(message: RawDiscordMessage, currentUser?: DiscordUserIdentity): boolean {
+  if (!currentUser) return false;
+  const messageUserId = discordUserIdFromAvatarUrl(message.avatarUrl);
+  const currentUserId = discordUserIdFromAvatarUrl(currentUser.avatarUrl);
+  if (messageUserId && currentUserId) return messageUserId === currentUserId;
+
+  const messageName = message.author?.trim().toLocaleLowerCase();
+  const currentName = currentUser.displayName?.trim().toLocaleLowerCase();
+  return Boolean(
+    messageName
+    && currentName
+    && messageName === currentName
+    && canonicalAvatarUrl(message.avatarUrl)
+    && canonicalAvatarUrl(message.avatarUrl) === canonicalAvatarUrl(currentUser.avatarUrl),
+  );
+}
+
+function canonicalAvatarUrl(value?: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return value.split(/[?#]/, 1)[0];
+  }
 }
 
 function inheritContinuationAuthors(messages: RawDiscordMessage[]): RawDiscordMessage[] {

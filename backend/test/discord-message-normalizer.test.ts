@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  discordUserIdFromAvatarUrl,
   normalizeDiscordMessages,
   type RawDiscordMessage,
 } from "../src/discord-message-normalizer.js";
@@ -93,4 +94,61 @@ test("does not leak the previous avatar onto a newly named speaker", () => {
   ], conversationId, 50);
 
   assert.deepEqual(messages[1]?.author, { displayName: "Grace" });
+});
+
+test("extracts Discord user IDs from custom avatar URLs", () => {
+  assert.equal(
+    discordUserIdFromAvatarUrl(
+      "https://cdn.discordapp.com/avatars/575109908169752577/8e9f87485c30fafa86957733f72d1345.webp?size=48",
+    ),
+    "575109908169752577",
+  );
+  assert.equal(discordUserIdFromAvatarUrl("https://cdn.discordapp.com/embed/avatars/1.png"), undefined);
+});
+
+test("marks messages from the logged-in Discord user as mine by avatar user ID", () => {
+  const myAvatar = "https://cdn.discordapp.com/avatars/575109908169752577/current.webp?size=48";
+  const messages = normalizeDiscordMessages([
+    raw({ author: "Server nickname", avatarUrl: myAvatar }),
+    raw({
+      id: nextMessageId,
+      author: undefined,
+      avatarUrl: undefined,
+      content: "continuation",
+    }),
+  ], conversationId, 50, {
+    displayName: "Account username",
+    avatarUrl: "https://cdn.discordapp.com/avatars/575109908169752577/current.webp?size=80",
+  });
+
+  assert.equal(messages[0]?.author.id, "me");
+  assert.equal(messages[1]?.author.id, "me");
+});
+
+test("does not mark a different Discord user as mine when the names match", () => {
+  const [message] = normalizeDiscordMessages([
+    raw({
+      author: "aesthetic",
+      avatarUrl: "https://cdn.discordapp.com/avatars/111111111111111111/avatar.webp?size=48",
+    }),
+  ], conversationId, 50, {
+    displayName: "aesthetic",
+    avatarUrl: "https://cdn.discordapp.com/avatars/222222222222222222/avatar.webp?size=48",
+  });
+
+  assert.equal(message?.author.id, undefined);
+});
+
+test("falls back to matching username and canonical avatar URL", () => {
+  const [message] = normalizeDiscordMessages([
+    raw({
+      author: "aesthetic",
+      avatarUrl: "https://cdn.discordapp.com/embed/avatars/1.png?size=48",
+    }),
+  ], conversationId, 50, {
+    displayName: "AESTHETIC",
+    avatarUrl: "https://cdn.discordapp.com/embed/avatars/1.png?size=80",
+  });
+
+  assert.equal(message?.author.id, "me");
 });

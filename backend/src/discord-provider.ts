@@ -3,7 +3,10 @@ import type { BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { AsyncLock } from "./async-lock.js";
 import { normalizeDiscordConversationTitle } from "./discord-conversation-title.js";
-import { normalizeDiscordMessages } from "./discord-message-normalizer.js";
+import {
+  normalizeDiscordMessages,
+  type DiscordUserIdentity,
+} from "./discord-message-normalizer.js";
 import { AppError, errorMessage } from "./errors.js";
 import type {
   Conversation,
@@ -26,6 +29,15 @@ interface DiscoveredConversation extends Conversation {
   path: string;
 }
 
+interface RawDiscordConversation {
+  channelId: string;
+  path: string;
+  label: string;
+  avatarUrl?: string;
+  kind: "direct" | "group";
+  unread: boolean;
+}
+
 const DISCORD_ORIGIN = "https://discord.com";
 const CHANNEL_PATH = /^\/channels\/(?:@me|\d+)\/(\d+)/;
 const MESSAGE_SELECTORS = '[data-list-item-id^="chat-messages"], [id^="chat-messages-"]';
@@ -37,8 +49,8 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
   private state: ReturnType<MessageProvider["status"]> = { state: "disconnected" };
   private readonly lock = new AsyncLock();
   private readonly conversations = new Map<string, DiscoveredConversation>();
-  private readonly watchedConversations = new Set<string>();
-  private readonly knownMessageIds = new Map<string, Set<string>>();
+  private currentUser?: DiscordUserIdentity;
+  private conversationSnapshotInitialized = false;
   private pollTimer?: NodeJS.Timeout;
   private pollInProgress = false;
 
@@ -66,6 +78,7 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
       this.page = this.context.pages()[0] ?? (await this.context.newPage());
       this.page.setDefaultTimeout(15_000);
       await this.ensureAuthenticated(this.page);
+      this.currentUser = await this.readCurrentUserIdentity(this.page);
       this.setStatus("connected");
       this.startPolling();
     } catch (error) {
@@ -80,6 +93,8 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
   async disconnect(): Promise<void> {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = undefined;
+    this.conversationSnapshotInitialized = false;
+    this.currentUser = undefined;
     await this.context?.close();
     this.context = undefined;
     this.page = undefined;
@@ -97,12 +112,7 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
   }
 
   async listMessages(conversationId: string, limit: number): Promise<Message[]> {
-    return this.lock.run(async () => {
-      const messages = await this.readMessages(this.connectedPage(), conversationId, limit);
-      this.watchedConversations.add(conversationId);
-      this.knownMessageIds.set(conversationId, new Set(messages.map((message) => message.id)));
-      return messages;
-    });
+    return this.lock.run(() => this.readMessages(this.connectedPage(), conversationId, limit));
   }
 
   async sendMessage(conversationId: string, input: SendMessageInput): Promise<Message> {
@@ -203,16 +213,36 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
       .first();
   }
 
+  private async readCurrentUserIdentity(page: Page): Promise<DiscordUserIdentity | undefined> {
+    const statusPanel = page.locator('[aria-label*="User status and settings" i]').first();
+    if (!(await statusPanel.isVisible().catch(() => false))) return this.currentUser;
+
+    return statusPanel.evaluate((node) => {
+      let scope: Element | null = node;
+      let avatar: HTMLImageElement | null = null;
+      for (let depth = 0; scope && depth < 6; depth += 1, scope = scope.parentElement) {
+        avatar = scope.querySelector('img[src*="/avatars/"], img[class*="avatar" i]');
+        if (avatar) break;
+      }
+      if (!scope || !avatar) return undefined;
+      const nameNode = scope.querySelector('[class*="username" i], [class*="nameTag" i]');
+      const displayName = nameNode?.textContent?.trim() || avatar.alt.trim() || undefined;
+      return {
+        ...(displayName ? { displayName } : {}),
+        ...(avatar.src ? { avatarUrl: avatar.src } : {}),
+      };
+    });
+  }
+
   private async discoverConversations(page: Page): Promise<void> {
     await this.navigateDiscordPath(page, "/channels/@me");
     await this.waitForDiscordShell(page);
     await page.waitForTimeout(400);
-    this.conversations.clear();
-    await this.collectDirectConversationLinks(page);
+    await this.collectDirectConversationLinks(page, false);
   }
 
-  private async collectDirectConversationLinks(page: Page): Promise<void> {
-    const links = await page.locator('a[href^="/channels/@me/"]').evaluateAll((anchors) =>
+  private async collectDirectConversationLinks(page: Page, emitChanges: boolean): Promise<void> {
+    const links: RawDiscordConversation[] = await page.locator('a[href^="/channels/@me/"]').evaluateAll((anchors) =>
       anchors.flatMap((node) => {
         const anchor = node as HTMLAnchorElement;
         const path = anchor.getAttribute("href") || "";
@@ -221,6 +251,16 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         const label = anchor.getAttribute("aria-label") || anchor.textContent?.trim() || `Discord ${match[1]}`;
         const image = anchor.querySelector("img") as HTMLImageElement | null;
         const text = anchor.textContent || label;
+        const row = anchor.closest('[role="listitem"], li') || anchor.parentElement;
+        const notificationCopy = `${anchor.getAttribute("aria-label") || ""} ${row?.getAttribute("aria-label") || ""}`;
+        const hasNotificationIndicator = Boolean(row?.querySelector([
+          '[class*="unread" i]',
+          '[class*="mention" i]',
+          '[class*="numberBadge" i]',
+          '[aria-label*="unread" i]',
+          '[aria-label*="mention" i]',
+          '[aria-label*="notification" i]',
+        ].join(", ")));
         const participantCount = text.match(/\b(\d+)\s+members?\b/i)?.[1];
         return [{
           channelId: match[1],
@@ -230,14 +270,26 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
           kind: participantCount || /(?:\(|,\s*)group (?:message|chat)\b/i.test(label)
             ? "group" as const
             : "direct" as const,
-          unread: /\bunread\b/i.test(label),
+          unread: /\b(?:unread|mention|notification)\b/i.test(notificationCopy) || hasNotificationIndicator,
         }];
       }),
     );
 
+    const uniqueLinks = new Map<string, RawDiscordConversation>();
     for (const link of links) {
+      const existing = uniqueLinks.get(link.channelId);
+      uniqueLinks.set(link.channelId, existing ? {
+        ...existing,
+        ...link,
+        avatarUrl: link.avatarUrl || existing.avatarUrl,
+        unread: existing.unread || link.unread,
+      } : link);
+    }
+
+    for (const link of uniqueLinks.values()) {
       const id = this.conversationId(link.channelId);
-      this.conversations.set(id, {
+      const previous = this.conversations.get(id);
+      const conversation: DiscoveredConversation = {
         id,
         provider: "discord",
         providerConversationId: link.channelId,
@@ -246,8 +298,15 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         avatarUrl: link.avatarUrl,
         unread: link.unread,
         path: link.path,
-      });
+      };
+      this.conversations.set(id, conversation);
+      if (emitChanges && this.conversationSnapshotInitialized
+        && ((!previous && conversation.unread) || (previous && previous.unread !== conversation.unread))) {
+        const { path: _path, ...publicConversation } = conversation;
+        this.emitEvent("conversation.updated", publicConversation);
+      }
     }
+    if (uniqueLinks.size > 0) this.conversationSnapshotInitialized = true;
   }
 
   private async readMessages(page: Page, conversationId: string, limit: number): Promise<Message[]> {
@@ -315,6 +374,7 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
   }
 
   private async scrapeVisibleMessages(page: Page, conversationId: string, limit: number): Promise<Message[]> {
+    this.currentUser = await this.readCurrentUserIdentity(page) ?? this.currentUser;
     const rawMessages = await page.locator(MESSAGE_SELECTORS).evaluateAll((nodes) =>
       nodes.map((node) => {
         const element = node as HTMLElement;
@@ -355,32 +415,26 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
       }),
     );
 
-    return normalizeDiscordMessages(rawMessages, conversationId, limit);
+    return normalizeDiscordMessages(rawMessages, conversationId, limit, this.currentUser);
   }
 
   private startPolling(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = setInterval(() => void this.pollWatchedConversations(), this.options.pollIntervalMs);
+    this.pollTimer = setInterval(() => void this.pollNativeNotifications(), this.options.pollIntervalMs);
     this.pollTimer.unref();
   }
 
-  private async pollWatchedConversations(): Promise<void> {
-    if (this.pollInProgress || this.watchedConversations.size === 0 || this.state.state !== "connected") return;
+  private async pollNativeNotifications(): Promise<void> {
+    if (this.pollInProgress || this.state.state !== "connected") return;
     this.pollInProgress = true;
     try {
-      for (const conversationId of this.watchedConversations) {
-        await this.lock.run(async () => {
-          const messages = await this.readMessages(this.connectedPage(), conversationId, 50);
-          const known = this.knownMessageIds.get(conversationId) ?? new Set<string>();
-          for (const message of messages) {
-            if (!known.has(message.id)) this.emitEvent("message.created", message);
-            known.add(message.id);
-          }
-          this.knownMessageIds.set(conversationId, known);
-        });
-      }
-    } catch (error) {
-      this.setStatus("error", errorMessage(error));
+      await this.lock.run(async () => {
+        const page = this.connectedPage();
+        if (!new URL(page.url()).pathname.startsWith("/channels/@me")) return;
+        await this.collectDirectConversationLinks(page, true);
+      });
+    } catch {
+      // Native notification polling is best-effort and must not disconnect the provider.
     } finally {
       this.pollInProgress = false;
     }

@@ -23,7 +23,7 @@ interface InstagramProviderOptions {
 }
 
 interface DiscoveredConversation extends Conversation {
-  path: string;
+  path?: string;
 }
 
 interface RawInstagramConversation {
@@ -87,8 +87,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
   private state: ReturnType<MessageProvider["status"]> = { state: "disconnected" };
   private readonly lock = new AsyncLock();
   private readonly conversations = new Map<string, DiscoveredConversation>();
-  private readonly watchedConversations = new Set<string>();
-  private readonly knownMessageIds = new Map<string, Set<string>>();
+  private conversationSnapshotInitialized = false;
   private readonly messageDomReferences = new Map<string, MessageDomReference>();
   private pollTimer?: NodeJS.Timeout;
   private pollInProgress = false;
@@ -131,6 +130,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
   async disconnect(): Promise<void> {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = undefined;
+    this.conversationSnapshotInitialized = false;
     await this.context?.close();
     this.context = undefined;
     this.page = undefined;
@@ -147,12 +147,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
   }
 
   async listMessages(conversationId: string, limit: number): Promise<Message[]> {
-    return this.lock.run(async () => {
-      const messages = await this.readMessages(this.connectedPage(), conversationId, limit);
-      this.watchedConversations.add(conversationId);
-      this.knownMessageIds.set(conversationId, new Set(messages.map((message) => message.id)));
-      return messages;
-    });
+    return this.lock.run(() => this.readMessages(this.connectedPage(), conversationId, limit));
   }
 
   async sendMessage(conversationId: string, input: SendMessageInput): Promise<Message> {
@@ -277,13 +272,24 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
   }
 
   private async discoverConversations(page: Page): Promise<void> {
-    if (new URL(page.url()).pathname !== "/direct/inbox/") {
+    const startingPath = new URL(page.url()).pathname;
+    if (!startingPath.startsWith("/direct/")) {
       await page.goto(`${INSTAGRAM_ORIGIN}/direct/inbox/`, { waitUntil: "domcontentloaded" });
     }
     await page.locator(`${THREAD_LINK_SELECTOR}, ${THREAD_ROW_SELECTOR}`).first()
       .waitFor({ state: "visible", timeout: 20_000 }).catch(() => undefined);
 
-    const links: RawInstagramConversation[] = await page.locator(THREAD_LINK_SELECTOR).evaluateAll((anchors) =>
+    const links = await this.findThreadLinks(page);
+
+    if (links.length > 0) {
+      this.applyDiscoveredConversations(links, false);
+    } else {
+      this.applyThreadRows(await this.findThreadRows(page), false);
+    }
+  }
+
+  private async findThreadLinks(page: Page): Promise<RawInstagramConversation[]> {
+    return page.locator(THREAD_LINK_SELECTOR).evaluateAll((anchors) =>
       anchors.flatMap((node) => {
         const anchor = node as HTMLAnchorElement;
         const path = new URL(anchor.href).pathname;
@@ -292,8 +298,26 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
         const imageAlts = [...anchor.querySelectorAll("img")]
           .map((image) => image.getAttribute("alt") || "")
           .filter(Boolean);
-        const unread = /\bunread\b/i.test(anchor.getAttribute("aria-label") || "")
-          || Boolean(anchor.querySelector('svg[aria-label*="unread" i], [aria-label*="new message" i]'));
+        const row = anchor.closest('[role="listitem"], [role="button"], li') || anchor;
+        const notificationCopy = `${anchor.getAttribute("aria-label") || ""} ${row.getAttribute("aria-label") || ""}`;
+        const hasAccessibleIndicator = Boolean(row.querySelector([
+          '[aria-label*="unread" i]',
+          '[aria-label*="new message" i]',
+          '[aria-label*="notification" i]',
+          '[role="status"]',
+        ].join(", ")));
+        const hasVisualBubble = [...row.querySelectorAll("div, span")].some((candidate) => {
+          const element = candidate as HTMLElement;
+          const rect = element.getBoundingClientRect();
+          if (rect.width < 4 || rect.width > 24 || rect.height < 4 || rect.height > 24
+            || Math.abs(rect.width - rect.height) > 3) return false;
+          const color = getComputedStyle(element).backgroundColor;
+          const channels = color.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+          if (!channels || channels.length < 3) return false;
+          const [red = 0, green = 0, blue = 0] = channels;
+          return (blue >= 180 && blue > red + 50 && blue > green + 30)
+            || (red >= 200 && green < 120 && blue < 150);
+        });
         return [{
           threadId: match[1],
           path,
@@ -301,42 +325,81 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           label: anchor.getAttribute("aria-label") || "",
           imageAlts,
           avatarUrl: (anchor.querySelector("img") as HTMLImageElement | null)?.src,
-          unread,
+          unread: /\b(?:unread|new message|notification)\b/i.test(notificationCopy)
+            || hasAccessibleIndicator
+            || hasVisualBubble,
         }];
       }),
     );
+  }
 
-    if (links.length === 0) {
-      const rows = await this.findThreadRows(page);
-      for (const row of rows) {
-        const previousPath = new URL(page.url()).pathname;
-        const rowLocator = page.locator(THREAD_ROW_SELECTOR).nth(row.index);
-        await rowLocator.scrollIntoViewIfNeeded();
-        await rowLocator.click();
-        await page.waitForURL((url) =>
-          url.pathname !== previousPath && /^\/direct\/t\/[^/?#]+\/?$/.test(url.pathname),
-        { timeout: 20_000 });
-        const path = new URL(page.url()).pathname;
-        const match = path.match(/^\/direct\/t\/([^/?#]+)\/?$/);
-        if (match?.[1]) links.push({ ...row, threadId: match[1], path });
-      }
+  private applyDiscoveredConversations(links: RawInstagramConversation[], emitChanges: boolean): void {
+    const uniqueLinks = new Map<string, RawInstagramConversation>();
+    for (const link of links) {
+      const existing = uniqueLinks.get(link.threadId);
+      uniqueLinks.set(link.threadId, existing ? {
+        ...existing,
+        ...link,
+        avatarUrl: link.avatarUrl || existing.avatarUrl,
+        unread: existing.unread || link.unread,
+      } : link);
     }
 
-    this.conversations.clear();
-    for (const link of links) {
-      const id = this.conversationId(link.threadId);
+    for (const link of uniqueLinks.values()) {
       const title = normalizeInstagramConversationTitle(link.text, link.label, link.imageAlts, link.threadId);
-      this.conversations.set(id, {
+      const previous = this.conversations.get(this.conversationId(link.threadId))
+        ?? [...this.conversations.values()].find((conversation) =>
+          conversation.path === link.path
+          || (link.avatarUrl && conversation.avatarUrl === link.avatarUrl && conversation.title === title));
+      const id = previous?.id ?? this.conversationId(link.threadId);
+      const conversation: DiscoveredConversation = {
         id,
         provider: "instagram",
-        providerConversationId: link.threadId,
+        providerConversationId: previous?.providerConversationId ?? link.threadId,
         title,
         kind: link.imageAlts.length > 1 || /\bgroup\b/i.test(link.label) ? "group" : "direct",
         ...(link.avatarUrl ? { avatarUrl: link.avatarUrl } : {}),
         unread: link.unread,
         path: link.path,
-      });
+      };
+      this.conversations.set(id, conversation);
+      this.emitConversationChange(previous, conversation, emitChanges);
     }
+    if (uniqueLinks.size > 0) this.conversationSnapshotInitialized = true;
+  }
+
+  private applyThreadRows(rows: InstagramThreadRow[], emitChanges: boolean): void {
+    for (const row of rows) {
+      const title = normalizeInstagramConversationTitle(row.text, row.label, row.imageAlts, "");
+      const previous = [...this.conversations.values()].find((conversation) =>
+        (row.avatarUrl && conversation.avatarUrl === row.avatarUrl) || conversation.title === title);
+      const rowProviderId = instagramThreadRowProviderId(title, row.avatarUrl, row.imageAlts);
+      const conversation: DiscoveredConversation = {
+        ...previous,
+        id: previous?.id ?? this.conversationId(rowProviderId),
+        provider: "instagram",
+        providerConversationId: previous?.providerConversationId ?? rowProviderId,
+        title,
+        kind: row.imageAlts.length > 1 || /\bgroup\b/i.test(row.label) ? "group" : "direct",
+        ...(row.avatarUrl ? { avatarUrl: row.avatarUrl } : {}),
+        unread: row.unread,
+      };
+      this.conversations.set(conversation.id, conversation);
+      this.emitConversationChange(previous, conversation, emitChanges);
+    }
+    if (rows.length > 0 && this.conversations.size > 0) this.conversationSnapshotInitialized = true;
+  }
+
+  private emitConversationChange(
+    previous: DiscoveredConversation | undefined,
+    conversation: DiscoveredConversation,
+    emitChanges: boolean,
+  ): void {
+    if (!emitChanges || !this.conversationSnapshotInitialized
+      || (!previous && !conversation.unread)
+      || (previous && previous.unread === conversation.unread)) return;
+    const { path: _path, ...publicConversation } = conversation;
+    this.emitEvent("conversation.updated", publicConversation);
   }
 
   private async findThreadRows(page: Page): Promise<InstagramThreadRow[]> {
@@ -350,14 +413,34 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
         // controls such as the account menu, compose button, and Notes carousel.
         if (rect.width < 250 || rect.height < 48 || images.length === 0 || !text.trim()) return [];
         const label = button.getAttribute("aria-label") || "";
+        const notificationCopy = `${label} ${button.getAttribute("title") || ""}`;
+        const hasAccessibleIndicator = Boolean(button.querySelector([
+          '[aria-label*="unread" i]',
+          '[aria-label*="new message" i]',
+          '[aria-label*="notification" i]',
+          '[role="status"]',
+        ].join(", ")));
+        const hasVisualBubble = [...button.querySelectorAll("div, span")].some((candidate) => {
+          const element = candidate as HTMLElement;
+          const bubbleRect = element.getBoundingClientRect();
+          if (bubbleRect.width < 4 || bubbleRect.width > 24 || bubbleRect.height < 4 || bubbleRect.height > 24
+            || Math.abs(bubbleRect.width - bubbleRect.height) > 3) return false;
+          const color = getComputedStyle(element).backgroundColor;
+          const channels = color.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+          if (!channels || channels.length < 3) return false;
+          const [red = 0, green = 0, blue = 0] = channels;
+          return (blue >= 180 && blue > red + 50 && blue > green + 30)
+            || (red >= 200 && green < 120 && blue < 150);
+        });
         return [{
           index,
           text,
           label,
           imageAlts: images.map((image) => image.getAttribute("alt") || "").filter(Boolean),
           ...(images[0]?.src ? { avatarUrl: images[0].src } : {}),
-          unread: /\bunread\b/i.test(label)
-            || Boolean(button.querySelector('svg[aria-label*="unread" i], [aria-label*="new message" i]')),
+          unread: /\b(?:unread|new message|notification)\b/i.test(notificationCopy)
+            || hasAccessibleIndicator
+            || hasVisualBubble,
         }];
       }),
     );
@@ -376,12 +459,29 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     }
     if (!conversation) throw new AppError("Instagram conversation not found", 404, "CONVERSATION_NOT_FOUND");
 
-    if (new URL(page.url()).pathname !== conversation.path) {
+    if (!conversation.path) {
+      const rows = await this.findThreadRows(page);
+      const row = rows.find((candidate) => {
+        const title = normalizeInstagramConversationTitle(candidate.text, candidate.label, candidate.imageAlts, "");
+        return (candidate.avatarUrl && candidate.avatarUrl === conversation?.avatarUrl) || title === conversation?.title;
+      });
+      if (!row) throw new AppError("Instagram conversation is not visible", 404, "CONVERSATION_NOT_FOUND");
+      const previousPath = new URL(page.url()).pathname;
+      const rowLocator = page.locator(THREAD_ROW_SELECTOR).nth(row.index);
+      await rowLocator.scrollIntoViewIfNeeded();
+      await rowLocator.click();
+      await page.waitForURL((url) =>
+        url.pathname !== previousPath && /^\/direct\/t\/[^/?#]+\/?$/.test(url.pathname),
+      { timeout: 20_000 });
+      conversation = { ...conversation, path: new URL(page.url()).pathname };
+      this.conversations.set(conversationId, conversation);
+    } else if (new URL(page.url()).pathname !== conversation.path) {
       const link = page.locator(`a[href="${conversation.path}"]`).first();
       if (await link.isVisible().catch(() => false)) await link.click();
       else await page.goto(`${INSTAGRAM_ORIGIN}${conversation.path}`, { waitUntil: "domcontentloaded" });
     }
-    await page.waitForURL((url) => url.pathname === conversation.path, { timeout: 20_000 });
+    const targetPath = conversation.path;
+    await page.waitForURL((url) => url.pathname === targetPath, { timeout: 20_000 });
     await page.locator('textarea[placeholder*="message" i], [role="textbox"][contenteditable="true"]')
       .last().waitFor({ state: "visible", timeout: 20_000 }).catch(() => {
         throw new AppError("Instagram messages did not load", 502, "INSTAGRAM_READ_FAILED");
@@ -430,27 +530,23 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
 
   private startPolling(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = setInterval(() => void this.pollWatchedConversations(), this.options.pollIntervalMs);
+    this.pollTimer = setInterval(() => void this.pollNativeNotifications(), this.options.pollIntervalMs);
     this.pollTimer.unref();
   }
 
-  private async pollWatchedConversations(): Promise<void> {
-    if (this.pollInProgress || this.watchedConversations.size === 0 || this.state.state !== "connected") return;
+  private async pollNativeNotifications(): Promise<void> {
+    if (this.pollInProgress || this.state.state !== "connected") return;
     this.pollInProgress = true;
     try {
-      for (const conversationId of this.watchedConversations) {
-        await this.lock.run(async () => {
-          const messages = await this.readMessages(this.connectedPage(), conversationId, 50);
-          const known = this.knownMessageIds.get(conversationId) ?? new Set<string>();
-          for (const message of messages) {
-            if (!known.has(message.id)) this.emitEvent("message.created", message);
-            known.add(message.id);
-          }
-          this.knownMessageIds.set(conversationId, known);
-        });
-      }
-    } catch (error) {
-      this.setStatus("error", errorMessage(error));
+      await this.lock.run(async () => {
+        const page = this.connectedPage();
+        if (!new URL(page.url()).pathname.startsWith("/direct/")) return;
+        const links = await this.findThreadLinks(page);
+        if (links.length > 0) this.applyDiscoveredConversations(links, true);
+        else this.applyThreadRows(await this.findThreadRows(page), true);
+      });
+    } catch {
+      // Native notification polling is best-effort and must not disconnect the provider.
     } finally {
       this.pollInProgress = false;
     }
@@ -631,6 +727,24 @@ export function normalizeInstagramConversationTitle(
   const labelTitle = ariaLabel.replace(/,?\s*(?:unread|new message).*$/i, "").trim();
   const imageTitle = imageAlts[0]?.replace(/'?s profile picture.*$/i, "").trim();
   return textTitle || labelTitle || imageTitle || `Instagram ${fallback}`;
+}
+
+export function instagramThreadRowProviderId(
+  title: string,
+  avatarUrl: string | undefined,
+  imageAlts: string[],
+): string {
+  let stableAvatarUrl = avatarUrl ?? "";
+  if (avatarUrl) {
+    try {
+      const parsed = new URL(avatarUrl);
+      stableAvatarUrl = `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      stableAvatarUrl = avatarUrl.split("?", 1)[0] ?? avatarUrl;
+    }
+  }
+  const fingerprint = JSON.stringify([title, stableAvatarUrl, imageAlts]);
+  return `row-${createHash("sha256").update(fingerprint).digest("hex").slice(0, 24)}`;
 }
 
 function escapeRegExp(value: string): string {

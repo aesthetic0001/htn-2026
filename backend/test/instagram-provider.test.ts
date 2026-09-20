@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   classifyInstagramLoginState,
+  instagramThreadRowProviderId,
   normalizeInstagramConversationTitle,
 } from "../src/instagram-provider.js";
 
@@ -30,4 +31,20 @@ test("falls back to accessible labels, image alt text, and provider IDs", () => 
   assert.equal(normalizeInstagramConversationTitle("", "Weekend plans, unread", [], "123"), "Weekend plans");
   assert.equal(normalizeInstagramConversationTitle("", "", ["Grace's profile picture"], "123"), "Grace");
   assert.equal(normalizeInstagramConversationTitle("", "", [], "123"), "Instagram 123");
+});
+
+test("gives linkless Instagram thread rows a stable identity without opening them", () => {
+  const first = instagramThreadRowProviderId(
+    "Nora Chen",
+    "https://instagram.example/nora.jpg",
+    ["Nora Chen's profile picture"],
+  );
+  const second = instagramThreadRowProviderId(
+    "Nora Chen",
+    "https://instagram.example/nora.jpg?signature=refreshed",
+    ["Nora Chen's profile picture"],
+  );
+
+  assert.match(first, /^row-[a-f0-9]{24}$/);
+  assert.equal(second, first);
 });
