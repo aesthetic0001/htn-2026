@@ -49,6 +49,14 @@ function RootLayoutNav() {
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen
+          name="conversation/[conversationId]"
+          options={{
+            headerBackTitle: 'Messages',
+            headerShadowVisible: false,
+            headerStyle: { backgroundColor: '#f7f8fc' },
+          }}
+        />
         <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
       </Stack>
     </ThemeProvider>

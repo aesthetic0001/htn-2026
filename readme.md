@@ -16,3 +16,39 @@ when users want to perform actions like sending messages, replying to messages, 
 
 frontend with expo, backend with express.
 scraping done with playwright + custom built chromium to prevent automation detection.
+
+## Run the integrated app
+
+Start the backend first:
+
+```bash
+cd backend
+npm install
+# Create .env with DISCORD_EMAIL and DISCORD_PASSWORD.
+# USER_DATA_DIR defaults to backend/user-data.
+npm run dev
+```
+
+Then start Expo in a second terminal:
+
+```bash
+cd frontend
+npm install
+npm start
+```
+
+The frontend uses `http://localhost:3001` on web and the iOS simulator, and
+`http://10.0.2.2:3001` on the Android emulator. For a physical device, expose
+the backend on your LAN and give Expo the machine's reachable address:
+
+```bash
+# backend/.env
+HOST=0.0.0.0
+
+# frontend shell
+EXPO_PUBLIC_API_URL=http://192.168.1.10:3001 npm start
+```
+
+Use your machine's actual LAN IP in place of `192.168.1.10`. The Connections
+tab shows the address currently used by the frontend and the Discord provider
+state.

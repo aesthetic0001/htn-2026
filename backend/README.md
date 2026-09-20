@@ -20,7 +20,6 @@ Required environment variables:
 
 - `DISCORD_EMAIL`
 - `DISCORD_PASSWORD`
-- `USER_DATA_DIR`
 
 Optional variables:
 
@@ -30,6 +29,7 @@ Optional variables:
 - `HEADLESS`: defaults to `false`
 - `FRONTEND_ORIGIN`: comma-separated CORS origins; defaults to `*`
 - `POLL_INTERVAL_MS`: watched-conversation polling interval; defaults to `5000`
+- `USER_DATA_DIR`: persistent browser profile; defaults to `backend/user-data`
 
 If Discord requests CAPTCHA or MFA, complete it in the opened browser. The authenticated profile is retained in `USER_DATA_DIR` for later starts.
 

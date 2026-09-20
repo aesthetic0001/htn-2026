@@ -5,6 +5,8 @@ import { useEffect, useState } from 'react';
 export function useClientOnlyValue<S, C>(server: S, client: C): S | C {
   const [value, setValue] = useState<S | C>(server);
   useEffect(() => {
+    // This intentionally changes after hydration so server and client markup initially match.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setValue(client);
   }, [client]);
 
