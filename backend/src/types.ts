@@ -1,4 +1,11 @@
-export type ProviderName = "discord";
+export type ProviderName = "discord" | "instagram";
+
+export type ProviderState = "disconnected" | "connecting" | "connected" | "error";
+
+export interface ProviderStatus {
+  state: ProviderState;
+  detail?: string;
+}
 
 export interface Participant {
   id?: string;
@@ -14,9 +21,6 @@ export interface Conversation {
   kind: "direct" | "group";
   avatarUrl?: string;
   unread: boolean;
-  muted: boolean;
-  participantCount?: number;
-  presence?: "online" | "idle" | "do_not_disturb" | "offline";
 }
 
 export interface Attachment {
@@ -46,7 +50,7 @@ export interface MessageProvider {
   readonly name: ProviderName;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  status(): { state: "disconnected" | "connecting" | "connected" | "error"; detail?: string };
+  status(): ProviderStatus;
   listConversations(): Promise<Conversation[]>;
   listMessages(conversationId: string, limit: number): Promise<Message[]>;
   sendMessage(conversationId: string, input: SendMessageInput): Promise<Message>;
