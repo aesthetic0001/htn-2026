@@ -17,6 +17,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Avatar } from '@/components/Avatar';
 import { providerColors, providerLabels } from '@/data/messages';
 import { connectProvider, errorMessage, getConversations, getProviders } from '@/services/api';
+import {
+  getCachedMutedConversationIds,
+  getMutedConversationIds,
+  subscribeToMutedConversations,
+} from '@/services/muted-conversations';
 import { subscribeToRealtimeEvents } from '@/services/realtime';
 import type { Conversation, ProviderName, ProviderStatus } from '@/types/messaging';
 
@@ -28,8 +33,8 @@ const DISCORD_NOTIFICATION = '#DA373C';
 const INSTAGRAM_NOTIFICATION = '#0095F6';
 const FALLBACK_POLL_INTERVAL_MS = 60_000;
 
-function ConversationNotificationIndicator({ conversation }: { conversation: Conversation }) {
-  if (!conversation.unread) return null;
+function ConversationNotificationIndicator({ conversation, muted }: { conversation: Conversation; muted: boolean }) {
+  if (!conversation.unread || muted) return null;
   if (conversation.provider === 'instagram') {
     return <View accessibilityLabel="Unread Instagram messages" style={styles.instagramUnreadDot} />;
   }
@@ -51,16 +56,17 @@ function ConversationNotificationIndicator({ conversation }: { conversation: Con
   );
 }
 
-function ConversationRow({ conversation }: { conversation: Conversation }) {
-  const notificationLabel = conversation.unread
+function ConversationRow({ conversation, muted }: { conversation: Conversation; muted: boolean }) {
+  const notificationLabel = conversation.unread && !muted
     ? conversation.notification?.count
       ? `, ${conversation.notification.count} unread mentions`
       : ', unread messages'
     : '';
+  const mutedLabel = muted ? ', muted' : '';
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open conversation with ${conversation.title}${notificationLabel}`}
+      accessibilityLabel={`Open conversation with ${conversation.title}${notificationLabel}${mutedLabel}`}
       onPress={() => router.push({ pathname: '/conversation/[id]', params: { id: conversation.id } })}
       style={({ pressed }) => [styles.conversationRow, pressed && styles.rowPressed]}>
       <View>
@@ -70,10 +76,13 @@ function ConversationRow({ conversation }: { conversation: Conversation }) {
 
       <View style={styles.conversationCopy}>
         <View style={styles.rowTopLine}>
-          <Text numberOfLines={1} style={[styles.conversationTitle, conversation.unread && styles.unreadText]}>
+          <Text numberOfLines={1} style={[styles.conversationTitle, conversation.unread && !muted && styles.unreadText]}>
             {conversation.title}
           </Text>
-          <Text style={[styles.providerName, conversation.unread && styles.unreadTime]}>
+          {muted ? (
+            <SymbolView name={{ ios: 'bell.slash.fill', android: 'notifications_off', web: 'notifications_off' }} size={15} tintColor={MUTED} />
+          ) : null}
+          <Text style={[styles.providerName, conversation.unread && !muted && styles.unreadTime]}>
             {conversation.sources?.length
               ? `${conversation.sources.length} sources`
               : providerLabels[conversation.provider]}
@@ -81,10 +90,10 @@ function ConversationRow({ conversation }: { conversation: Conversation }) {
         </View>
 
         <View style={styles.rowBottomLine}>
-          <Text numberOfLines={1} style={[styles.preview, conversation.unread && styles.unreadPreview]}>
+          <Text numberOfLines={1} style={[styles.preview, conversation.unread && !muted && styles.unreadPreview]}>
             {conversation.preview ?? (conversation.kind === 'group' ? 'Group conversation' : 'Direct message')}
           </Text>
-          <ConversationNotificationIndicator conversation={conversation} />
+          <ConversationNotificationIndicator conversation={conversation} muted={muted} />
         </View>
       </View>
     </Pressable>
@@ -116,7 +125,10 @@ export default function InboxScreen() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<'all' | 'unread'>('all');
+  const [filter, setFilter] = useState<'all' | 'unread' | 'muted'>('all');
+  const [mutedConversationIds, setMutedConversationIds] = useState<ReadonlySet<string>>(
+    getCachedMutedConversationIds,
+  );
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [connecting, setConnecting] = useState<ProviderName>();
@@ -125,6 +137,20 @@ export default function InboxScreen() {
   const refreshQueued = useRef(false);
   const mounted = useRef(true);
   const { width } = useWindowDimensions();
+
+  useFocusEffect(useCallback(() => {
+    let active = true;
+    const unsubscribe = subscribeToMutedConversations((conversationIds) => {
+      if (active) setMutedConversationIds(conversationIds);
+    });
+    void getMutedConversationIds().then((conversationIds) => {
+      if (active) setMutedConversationIds(conversationIds);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []));
 
   const loadData = useCallback(async (showRefresh = false) => {
     if (requestInFlight.current) {
@@ -185,14 +211,17 @@ export default function InboxScreen() {
   const visibleConversations = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return conversations.filter((conversation) => {
-      const matchesFilter = filter === 'all' || conversation.unread;
+      const muted = mutedConversationIds.has(conversation.id);
+      const matchesFilter = filter === 'all'
+        || (filter === 'unread' && conversation.unread && !muted)
+        || (filter === 'muted' && muted);
       const matchesQuery = !normalizedQuery
         || conversation.title.toLowerCase().includes(normalizedQuery)
         || conversation.preview?.toLowerCase().includes(normalizedQuery)
         || providerLabels[conversation.provider].toLowerCase().includes(normalizedQuery);
       return matchesFilter && matchesQuery;
     });
-  }, [conversations, filter, query]);
+  }, [conversations, filter, mutedConversationIds, query]);
 
   const emptyCopy = loadError
     ? 'Check that the backend is running and that EXPO_PUBLIC_API_URL points to it.'
@@ -254,12 +283,12 @@ export default function InboxScreen() {
         </View>
 
         <View style={styles.filters}>
-          {(['all', 'unread'] as const).map((item) => {
+          {(['all', 'unread', 'muted'] as const).map((item) => {
             const active = item === filter;
             return (
               <Pressable key={item} onPress={() => setFilter(item)} style={[styles.filterChip, active && styles.filterChipActive]}>
                 <Text style={[styles.filterText, active && styles.filterTextActive]}>
-                  {item === 'all' ? 'All messages' : 'Unread'}
+                  {item === 'all' ? 'All messages' : item === 'unread' ? 'Unread' : 'Muted'}
                 </Text>
               </Pressable>
             );
@@ -267,7 +296,7 @@ export default function InboxScreen() {
         </View>
 
         <View style={styles.listHeadingRow}>
-          <Text style={styles.listHeading}>{filter === 'all' ? 'Conversations' : 'Unread'}</Text>
+          <Text style={styles.listHeading}>{filter === 'all' ? 'Conversations' : filter === 'unread' ? 'Unread' : 'Muted'}</Text>
           <Text style={styles.count}>{visibleConversations.length}</Text>
         </View>
 
@@ -278,7 +307,9 @@ export default function InboxScreen() {
           keyExtractor={(item) => item.id}
           keyboardShouldPersistTaps="handled"
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadData(true)} tintColor={ACCENT} />}
-          renderItem={({ item }) => <ConversationRow conversation={item} />}
+          renderItem={({ item }) => (
+            <ConversationRow conversation={item} muted={mutedConversationIds.has(item.id)} />
+          )}
           showsVerticalScrollIndicator={false}
           ListEmptyComponent={
             <View style={styles.emptyState}>

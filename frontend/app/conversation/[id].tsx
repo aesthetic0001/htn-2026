@@ -33,6 +33,12 @@ import {
   realtimeConversationId,
   subscribeToRealtimeEvents,
 } from '@/services/realtime';
+import {
+  getCachedMutedConversationIds,
+  getMutedConversationIds,
+  setConversationMuted,
+  subscribeToMutedConversations,
+} from '@/services/muted-conversations';
 import type { Conversation, Message, SendMessageInput } from '@/types/messaging';
 
 const INK = '#242320';
@@ -115,12 +121,31 @@ export default function ConversationScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
   const [updatingRoute, setUpdatingRoute] = useState(false);
+  const [updatingMute, setUpdatingMute] = useState(false);
   const [showRouteSettings, setShowRouteSettings] = useState(false);
+  const [mutedConversationIds, setMutedConversationIds] = useState<ReadonlySet<string>>(
+    getCachedMutedConversationIds,
+  );
   const [loadError, setLoadError] = useState<string>();
   const requestInFlight = useRef(false);
   const refreshQueued = useRef(false);
   const mounted = useRef(true);
   const { width } = useWindowDimensions();
+  const muted = conversationId ? mutedConversationIds.has(conversationId) : false;
+
+  useFocusEffect(useCallback(() => {
+    let active = true;
+    const unsubscribe = subscribeToMutedConversations((conversationIds) => {
+      if (active) setMutedConversationIds(conversationIds);
+    });
+    void getMutedConversationIds().then((conversationIds) => {
+      if (active) setMutedConversationIds(conversationIds);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []));
 
   const refreshThread = useCallback(async (showRefresh = false) => {
     if (!conversationId) return;
@@ -268,6 +293,19 @@ export default function ConversationScreen() {
     }
   }, [conversation, updatingRoute]);
 
+  const toggleMuted = useCallback(async () => {
+    if (!conversationId || updatingMute) return;
+    setUpdatingMute(true);
+    setLoadError(undefined);
+    try {
+      await setConversationMuted(conversationId, !muted);
+    } catch (error) {
+      setLoadError(`Unable to ${muted ? 'unmute' : 'mute'} this conversation. ${errorMessage(error)}`);
+    } finally {
+      if (mounted.current) setUpdatingMute(false);
+    }
+  }, [conversationId, muted, updatingMute]);
+
   const confirmUnmerge = useCallback(() => {
     if (!conversation || conversation.provider !== 'merged') return;
     Alert.alert(
@@ -318,14 +356,32 @@ export default function ConversationScreen() {
                 <Text numberOfLines={1} style={styles.title}>{conversation.title}</Text>
                 <View style={styles.subtitleRow}>
                   <View style={[styles.providerDot, { backgroundColor: providerColors[conversation.provider] }]} />
-                  <Text numberOfLines={1} style={styles.subtitle}>{subtitle}</Text>
+                  <Text numberOfLines={1} style={styles.subtitle}>{subtitle}{muted ? ' · Muted' : ''}</Text>
                 </View>
               </View>
             </View>
 
-            <Pressable accessibilityLabel="Refresh messages" hitSlop={10} onPress={() => void refreshThread(true)} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
-              <SymbolView name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }} size={20} tintColor={INK} />
-            </Pressable>
+            <View style={styles.headerActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={muted ? 'Unmute conversation' : 'Mute conversation'}
+                accessibilityState={{ disabled: updatingMute, selected: muted }}
+                disabled={updatingMute}
+                hitSlop={6}
+                onPress={() => void toggleMuted()}
+                style={({ pressed }) => [styles.iconButton, muted && styles.muteButtonActive, pressed && styles.pressed]}>
+                {updatingMute
+                  ? <ActivityIndicator color={ACCENT} size="small" />
+                  : <SymbolView
+                      name={{ ios: muted ? 'bell.slash.fill' : 'bell', android: muted ? 'notifications_off' : 'notifications', web: muted ? 'notifications_off' : 'notifications' }}
+                      size={20}
+                      tintColor={muted ? ACCENT : INK}
+                    />}
+              </Pressable>
+              <Pressable accessibilityLabel="Refresh messages" hitSlop={6} onPress={() => void refreshThread(true)} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
+                <SymbolView name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }} size={20} tintColor={INK} />
+              </Pressable>
+            </View>
           </View>
 
           {loadError ? (
@@ -421,7 +477,9 @@ const styles = StyleSheet.create({
   pageWide: { maxWidth: 680, borderLeftWidth: 1, borderRightWidth: 1, borderColor: '#E3DED5' },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   header: { height: 72, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: '#DED9CF' },
+  headerActions: { flexDirection: 'row', alignItems: 'center' },
   iconButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20 },
+  muteButtonActive: { backgroundColor: '#EAD8D0' },
   pressed: { opacity: 0.58, transform: [{ scale: 0.96 }] },
   person: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', marginLeft: 4 },
   personCopy: { flex: 1, minWidth: 0, marginLeft: 11 },
