@@ -1,4 +1,4 @@
-# providence
+# unitext - hack the north 2026
 
 centralized messaging platform
 
@@ -34,7 +34,7 @@ suppose you usually use some social media platform. you talk to *most* of your f
 
 have web scrapers programatically scrape your social media message feeds. users will manually connect each feed that they want to centralize (you provide your current login information or cookies). web scrapers will monitor each channel for new information and will convert it into a standardized format to be sent to the user.
 
-when users want to perform actions like sending messages, replying to messages, adding reactions, these will also be standardized. the possible actions in the app can be described as the intersection of all possible actions on the various platforms (ie. a feature available exclusively on one platform cannot be generalized for providence, and will not be included in the standardized sent message format).
+when users want to perform actions like sending messages, replying to messages, adding reactions, these will also be standardized. the possible actions in the app can be described as the intersection of all possible actions on the various platforms (ie. a feature that is not available on all platforms cannot be generalized for unitext, and will not be included in the standardized sent message format).
 
 ## implementation
 
@@ -44,11 +44,8 @@ foreground updates are streamed from the backend with server-sent events (SSE); 
 
 ## roadmap
 
-- add message deleting
-- add muting
 - clean up the ui
 - add reply features
-
 
 ## if there's time...
 
