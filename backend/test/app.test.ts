@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { after, before, test } from "node:test";
 import { createServer, type Server } from "node:http";
 import { createApp } from "../src/app.js";
+import { ProfileMergeStore } from "../src/profile-merge-store.js";
 import type { Conversation, Message, MessageProvider, ProviderName, SendMessageInput } from "../src/types.js";
 
 const conversation: Conversation = {
@@ -49,12 +50,14 @@ function instagramFixture() {
 
 class FakeProvider extends EventEmitter implements MessageProvider {
   sent?: SendMessageInput;
+  sentConversationId?: string;
+  reactionConversationId?: string;
   connectCalls = 0;
   messageAcknowledgements: boolean[] = [];
   constructor(
     readonly name: ProviderName,
     private readonly conversation: Conversation,
-    private readonly message: Message,
+    private readonly message: Message | Message[],
   ) { super(); }
   status() { return { state: "connected" as const }; }
   async connect() { this.connectCalls += 1; }
@@ -62,13 +65,15 @@ class FakeProvider extends EventEmitter implements MessageProvider {
   async listConversations() { return [this.conversation]; }
   async listMessages(_conversationId: string, _limit: number, acknowledge = false) {
     this.messageAcknowledgements.push(acknowledge);
-    return [this.message];
+    return Array.isArray(this.message) ? this.message : [this.message];
   }
-  async sendMessage(_id: string, input: SendMessageInput) {
+  async sendMessage(id: string, input: SendMessageInput) {
     this.sent = input;
-    return { ...this.message, content: input.content };
+    this.sentConversationId = id;
+    const message = Array.isArray(this.message) ? this.message[0]! : this.message;
+    return { ...message, conversationId: id, content: input.content };
   }
-  async addReaction() {}
+  async addReaction(conversationId: string) { this.reactionConversationId = conversationId; }
 }
 
 const instagram = instagramFixture();
@@ -141,6 +146,145 @@ test("validates and sends messages", async () => {
   });
   assert.equal(instagramSent.status, 201);
   assert.deepEqual(instagramProvider.sent, { content: "instagram message" });
+});
+
+test("manually merges direct messages and routes sends by frequency or override", async () => {
+  const discordConversation: Conversation = {
+    ...conversation,
+    title: "Ada on Discord",
+    preview: "latest discord message",
+    lastUpdatedAt: "2026-01-03T00:00:00.000Z",
+  };
+  const discordMessages: Message[] = [
+    { ...message, id: "discord:455", providerMessageId: "455", sentAt: "2026-01-01T00:00:00.000Z" },
+    { ...message, id: "discord:456", providerMessageId: "456", sentAt: "2026-01-03T00:00:00.000Z" },
+  ];
+  const instagramConversation: Conversation = {
+    ...instagram.conversation,
+    title: "Ada on Instagram",
+    preview: "instagram message",
+    lastUpdatedAt: "2026-01-02T00:00:00.000Z",
+  };
+  const instagramMessage: Message = {
+    ...instagram.message,
+    sentAt: "2026-01-02T00:00:00.000Z",
+  };
+  const discord = new FakeProvider("discord", discordConversation, discordMessages);
+  const instagramSource = new FakeProvider("instagram", instagramConversation, instagramMessage);
+  const mergeServer = createServer(createApp(
+    [discord, instagramSource],
+    "*",
+    new ProfileMergeStore(),
+  ));
+  await new Promise<void>((resolve) => mergeServer.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const address = mergeServer.address();
+    assert(address && typeof address !== "string");
+    const mergeBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    const created = await fetch(`${mergeBaseUrl}/api/profile-merges`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversationIds: [discordConversation.id, instagramConversation.id] }),
+    });
+    assert.equal(created.status, 201);
+    const profile = (await created.json() as { profile: { id: string } }).profile;
+    assert.match(profile.id, /^profile:/);
+
+    const listed = await fetch(`${mergeBaseUrl}/api/conversations`);
+    const listedBody = await listed.json() as { conversations: Conversation[] };
+    assert.equal(listedBody.conversations.length, 1);
+    assert.deepEqual(listedBody.conversations[0], {
+      id: profile.id,
+      provider: "merged",
+      providerConversationId: profile.id.slice("profile:".length),
+      title: "Ada on Discord",
+      kind: "direct",
+      unread: true,
+      preview: "latest discord message",
+      notification: { kind: "unread" },
+      lastUpdatedAt: "2026-01-03T00:00:00.000Z",
+      sources: [
+        { conversationId: "discord:123", provider: "discord", title: "Ada on Discord" },
+        { conversationId: "instagram:abc", provider: "instagram", title: "Ada on Instagram" },
+      ],
+      sendRoute: "most_frequent",
+    });
+
+    const mergedMessages = await fetch(
+      `${mergeBaseUrl}/api/conversations/${encodeURIComponent(profile.id)}/messages?limit=10&acknowledge=true`,
+    );
+    const mergedBody = await mergedMessages.json() as { messages: Message[] };
+    assert.deepEqual(mergedBody.messages.map(({ id }) => id), ["discord:455", "instagram:def", "discord:456"]);
+    assert.equal(discord.messageAcknowledgements.at(-1), true);
+    assert.equal(instagramSource.messageAcknowledgements.at(-1), true);
+
+    const automaticSend = await fetch(
+      `${mergeBaseUrl}/api/conversations/${encodeURIComponent(profile.id)}/messages`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "automatic" }),
+      },
+    );
+    assert.equal(automaticSend.status, 201);
+    assert.equal(discord.sentConversationId, discordConversation.id);
+
+    const overridden = await fetch(`${mergeBaseUrl}/api/profile-merges/${encodeURIComponent(profile.id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sendConversationId: instagramConversation.id }),
+    });
+    assert.equal(overridden.status, 200);
+
+    const overrideSend = await fetch(
+      `${mergeBaseUrl}/api/conversations/${encodeURIComponent(profile.id)}/messages`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "override" }),
+      },
+    );
+    assert.equal(overrideSend.status, 201);
+    assert.equal(instagramSource.sentConversationId, instagramConversation.id);
+
+    const reacted = await fetch(
+      `${mergeBaseUrl}/api/conversations/${encodeURIComponent(profile.id)}/messages/instagram%3Adef/reactions`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ emoji: "❤️" }),
+      },
+    );
+    assert.equal(reacted.status, 204);
+    assert.equal(instagramSource.reactionConversationId, instagramConversation.id);
+
+    const removed = await fetch(`${mergeBaseUrl}/api/profile-merges/${encodeURIComponent(profile.id)}`, {
+      method: "DELETE",
+    });
+    assert.equal(removed.status, 204);
+    const unmerged = await fetch(`${mergeBaseUrl}/api/conversations`);
+    assert.equal((await unmerged.json() as { conversations: Conversation[] }).conversations.length, 2);
+  } finally {
+    await new Promise<void>((resolve, reject) => mergeServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("rejects invalid manual profile merges", async () => {
+  const oneConversation = await fetch(`${baseUrl}/api/profile-merges`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ conversationIds: [conversation.id] }),
+  });
+  assert.equal(oneConversation.status, 400);
+
+  const missingConversation = await fetch(`${baseUrl}/api/profile-merges`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ conversationIds: [conversation.id, "discord:missing"] }),
+  });
+  assert.equal(missingConversation.status, 400);
 });
 
 test("connects the requested provider and rejects unknown ID prefixes", async () => {

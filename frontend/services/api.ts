@@ -1,4 +1,12 @@
-import type { Conversation, Message, ProviderName, ProviderStatus, SendMessageInput } from '@/types/messaging';
+import type {
+  Conversation,
+  Message,
+  ProfileMerge,
+  ProfileMergeCandidate,
+  ProviderName,
+  ProviderStatus,
+  SendMessageInput,
+} from '@/types/messaging';
 import { Platform } from 'react-native';
 
 const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
@@ -67,6 +75,39 @@ export async function connectProvider(provider: ProviderName): Promise<ProviderS
 export async function getConversations(): Promise<Conversation[]> {
   const body = await request<{ conversations: Conversation[] }>('/api/conversations');
   return body.conversations;
+}
+
+export async function getProfileMergeCandidates(): Promise<ProfileMergeCandidate[]> {
+  const body = await request<{ conversations: ProfileMergeCandidate[] }>('/api/profile-merges/candidates');
+  return body.conversations;
+}
+
+export async function createProfileMerge(conversationIds: string[]): Promise<ProfileMerge> {
+  const body = await request<{ profile: ProfileMerge }>('/api/profile-merges', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversationIds }),
+  });
+  return body.profile;
+}
+
+export async function setProfileSendOverride(
+  profileId: string,
+  sendConversationId: string | null,
+): Promise<ProfileMerge> {
+  const body = await request<{ profile: ProfileMerge }>(
+    `/api/profile-merges/${encodeURIComponent(profileId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sendConversationId }),
+    },
+  );
+  return body.profile;
+}
+
+export function deleteProfileMerge(profileId: string) {
+  return request<void>(`/api/profile-merges/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
 }
 
 export async function getMessages(conversationId: string, limit = 100, acknowledge = false): Promise<Message[]> {

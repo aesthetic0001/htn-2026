@@ -40,6 +40,10 @@ export const config = {
     backendDirectory,
     process.env.INSTAGRAM_USER_DATA_DIR?.trim() || "instagram-user-data",
   ),
+  profileMergesPath: path.resolve(
+    backendDirectory,
+    process.env.PROFILE_MERGES_PATH?.trim() || "data/profile-merges.json",
+  ),
   headless: process.env.HEADLESS === "true",
   pollIntervalMs: integer("POLL_INTERVAL_MS", 5_000),
   frontendOrigin: process.env.FRONTEND_ORIGIN?.trim() || "*",

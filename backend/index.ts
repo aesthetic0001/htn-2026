@@ -3,6 +3,7 @@ import { createApp } from "./src/app.js";
 import { config, configuredCredentials } from "./src/config.js";
 import { DiscordProvider } from "./src/discord-provider.js";
 import { InstagramProvider } from "./src/instagram-provider.js";
+import { ProfileMergeStore } from "./src/profile-merge-store.js";
 
 const providers: Array<DiscordProvider | InstagramProvider> = [];
 const discordCredentials = configuredCredentials("Discord", config.discordEmail, config.discordPassword);
@@ -28,7 +29,8 @@ if (instagramCredentials) {
   }));
 }
 
-const server = createServer(createApp(providers, config.frontendOrigin));
+const profileMerges = new ProfileMergeStore(config.profileMergesPath);
+const server = createServer(createApp(providers, config.frontendOrigin, profileMerges));
 server.listen(config.port, config.host, () => {
   console.log(`Providence backend listening at http://${config.host}:${config.port}`);
   for (const provider of providers) {

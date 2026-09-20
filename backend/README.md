@@ -32,6 +32,7 @@ Optional variables:
 - `HEADLESS`: defaults to `false`
 - `FRONTEND_ORIGIN`: comma-separated CORS origins; defaults to `*`
 - `POLL_INTERVAL_MS`: watched-conversation polling interval; defaults to `5000`
+- `PROFILE_MERGES_PATH`: JSON file used to persist manual profile merges; defaults to `data/profile-merges.json`
 
 The API can start without credentials so the frontend can display its setup state, but no providers or conversations will be available until credentials are configured and the backend is restarted.
 
@@ -41,12 +42,19 @@ If a provider requests CAPTCHA, MFA, or a login challenge, complete it in the op
 
 The public conversation/message model is the common subset supported by both providers. It includes direct and group conversations, provider-native unread notification state, conversation previews, text and media attachments, edit metadata, and emoji reactions. Discord mention badges/counts and Instagram preview/blue-dot state are normalized on each conversation. `lastUpdatedAt` advances for native notification changes and newly observed incoming messages; `lastAcknowledgedAt` only catches up when a focused Providence thread acknowledges the messages. Discord-only metadata such as presence, mute state, and member counts is deliberately not exposed.
 
+Users can manually merge two or more direct messages into a `profile:` conversation. A merged conversation exposes its source conversations, combines their message histories, and acknowledges every source when opened. New messages use the explicitly configured source when present; otherwise Providence chooses the source with the largest recent message history (with most-recent activity as the tie-breaker). Source messages retain their provider-qualified conversation IDs so reactions return to the correct provider.
+
 ## API
 
 - `GET /health`
 - `GET /api/providers`
 - `POST /api/providers/:provider/connect` where `provider` is `discord` or `instagram`
 - `GET /api/conversations`
+- `GET /api/profile-merges/candidates`
+- `GET /api/profile-merges`
+- `POST /api/profile-merges` with `{ "conversationIds": ["discord:123", "instagram:abc"] }`
+- `PATCH /api/profile-merges/:profileId` with `{ "sendConversationId": "discord:123" }`; send `null` to restore automatic routing
+- `DELETE /api/profile-merges/:profileId`
 - `GET /api/conversations/:conversationId/messages?limit=50&acknowledge=true` (`acknowledge` is only sent by a focused Providence thread)
 - `POST /api/conversations/:conversationId/messages` with `{ "content": "..." }`
 - `POST /api/conversations/:conversationId/messages/:messageId/reactions` with `{ "emoji": "..." }`

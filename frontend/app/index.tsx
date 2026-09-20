@@ -1,5 +1,5 @@
 import { SymbolView } from 'expo-symbols';
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, type Href } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -35,10 +35,17 @@ function ConversationNotificationIndicator({ conversation }: { conversation: Con
   }
 
   const count = conversation.notification?.count;
+  const accessibilityLabel = conversation.provider === 'merged'
+    ? count ? `${count} unread mentions across merged profile` : 'Unread messages across merged profile'
+    : count ? `${count} Discord mentions` : 'Unread Discord messages';
   return (
     <View
-      accessibilityLabel={count ? `${count} Discord mentions` : 'Unread Discord messages'}
-      style={[styles.discordUnreadBadge, !count && styles.discordUnreadDot]}>
+      accessibilityLabel={accessibilityLabel}
+      style={[
+        styles.discordUnreadBadge,
+        conversation.provider === 'merged' && styles.mergedUnreadBadge,
+        !count && styles.discordUnreadDot,
+      ]}>
       {count ? <Text style={styles.discordUnreadCount}>{count > 99 ? '99+' : count}</Text> : null}
     </View>
   );
@@ -67,7 +74,9 @@ function ConversationRow({ conversation }: { conversation: Conversation }) {
             {conversation.title}
           </Text>
           <Text style={[styles.providerName, conversation.unread && styles.unreadTime]}>
-            {providerLabels[conversation.provider]}
+            {conversation.sources?.length
+              ? `${conversation.sources.length} sources`
+              : providerLabels[conversation.provider]}
           </Text>
         </View>
 
@@ -199,13 +208,22 @@ export default function InboxScreen() {
             <Text style={styles.eyebrow}>PROVIDENCE</Text>
             <Text style={styles.heading}>Messages</Text>
           </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Refresh conversations"
-            onPress={() => void loadData(true)}
-            style={({ pressed }) => [styles.refreshButton, pressed && styles.buttonPressed]}>
-            <SymbolView name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }} size={20} tintColor={PAPER} />
-          </Pressable>
+          <View style={styles.headerActions}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Merge profiles"
+              onPress={() => router.push('/merge' as Href)}
+              style={({ pressed }) => [styles.mergeButton, pressed && styles.buttonPressed]}>
+              <SymbolView name={{ ios: 'person.2', android: 'group_add', web: 'group_add' }} size={20} tintColor={INK} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Refresh conversations"
+              onPress={() => void loadData(true)}
+              style={({ pressed }) => [styles.refreshButton, pressed && styles.buttonPressed]}>
+              <SymbolView name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }} size={20} tintColor={PAPER} />
+            </Pressable>
+          </View>
         </View>
 
         {providers.length ? (
@@ -279,6 +297,8 @@ const styles = StyleSheet.create({
   page: { flex: 1, width: '100%', alignSelf: 'center' },
   pageWide: { maxWidth: 680 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 24, paddingTop: 22, paddingBottom: 16 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  mergeButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#D5CFC5', backgroundColor: '#FFFCF6' },
   eyebrow: { color: ACCENT, fontSize: 11, fontWeight: '800', letterSpacing: 2.1, marginBottom: 6 },
   heading: { color: INK, fontSize: 34, fontWeight: '700', letterSpacing: -1.2 },
   refreshButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: INK },
@@ -315,6 +335,7 @@ const styles = StyleSheet.create({
   unreadPreview: { color: '#4E4B46', fontWeight: '500' },
   instagramUnreadDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: INSTAGRAM_NOTIFICATION, marginRight: 3 },
   discordUnreadBadge: { minWidth: 20, height: 20, paddingHorizontal: 5, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: DISCORD_NOTIFICATION, marginRight: 1 },
+  mergedUnreadBadge: { backgroundColor: ACCENT },
   discordUnreadDot: { minWidth: 10, width: 10, height: 10, paddingHorizontal: 0, borderRadius: 5, marginRight: 3 },
   discordUnreadCount: { color: '#FFFFFF', fontSize: 10, lineHeight: 13, fontWeight: '800' },
   separator: { height: 1, marginLeft: 74, backgroundColor: '#E3DED5' },

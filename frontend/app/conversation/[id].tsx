@@ -3,6 +3,7 @@ import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Linking,
@@ -21,10 +22,12 @@ import { Avatar } from '@/components/Avatar';
 import { currentUser, providerColors, providerLabels } from '@/data/messages';
 import {
   addReaction,
+  deleteProfileMerge,
   errorMessage,
   getConversations,
   getMessages,
   sendMessage,
+  setProfileSendOverride,
 } from '@/services/api';
 import {
   realtimeConversationId,
@@ -45,9 +48,11 @@ function messageTime(value: string) {
 function MessageItem({
   message,
   onReact,
+  showProvider,
 }: {
   message: Message;
   onReact: (messageId: string, emoji: string) => void;
+  showProvider: boolean;
 }) {
   const mine = message.author.id === currentUser.id || message.author.displayName === currentUser.displayName;
 
@@ -56,6 +61,7 @@ function MessageItem({
       {!mine ? <Avatar name={message.author.displayName} imageUrl={message.author.avatarUrl} size={34} /> : null}
       <View style={[styles.messageColumn, mine && styles.messageColumnMine]}>
         {!mine ? <Text style={styles.author}>{message.author.displayName}</Text> : null}
+        {showProvider ? <Text style={[styles.messageProvider, mine && styles.messageProviderMine]}>{providerLabels[message.provider]}</Text> : null}
         <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
           {message.content ? <Text style={[styles.messageText, mine && styles.messageTextMine]}>{message.content}</Text> : null}
 
@@ -105,6 +111,8 @@ export default function ConversationScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
+  const [updatingRoute, setUpdatingRoute] = useState(false);
+  const [showRouteSettings, setShowRouteSettings] = useState(false);
   const [loadError, setLoadError] = useState<string>();
   const requestInFlight = useRef(false);
   const refreshQueued = useRef(false);
@@ -179,7 +187,7 @@ export default function ConversationScreen() {
     const unsubscribe = subscribeToRealtimeEvents((event) => {
       if (event.type === 'ready') {
         void loadConversation();
-      } else if (realtimeConversationId(event) === conversationId) {
+      } else if (conversationId?.startsWith('profile:') || realtimeConversationId(event) === conversationId) {
         void refreshThread();
       }
     });
@@ -192,7 +200,17 @@ export default function ConversationScreen() {
     };
   }, [conversationId, loadConversation, refreshThread]));
 
-  const subtitle = useMemo(() => conversation ? providerLabels[conversation.provider] : '', [conversation]);
+  const subtitle = useMemo(() => {
+    if (!conversation) return '';
+    if (!conversation.sources?.length) return providerLabels[conversation.provider];
+    return conversation.sources.map(({ provider }) => providerLabels[provider]).join(' + ');
+  }, [conversation]);
+
+  const sendRouteLabel = useMemo(() => {
+    if (!conversation?.sources?.length) return conversation ? providerLabels[conversation.provider] : '';
+    const override = conversation.sources.find(({ conversationId: id }) => id === conversation.sendConversationId);
+    return override ? providerLabels[override.provider] : 'most frequented source';
+  }, [conversation]);
 
   const handleSend = useCallback(async () => {
     const input: SendMessageInput = { content: draft.trim() };
@@ -220,12 +238,50 @@ export default function ConversationScreen() {
         : reaction),
     }));
     try {
-      await addReaction(conversationId, messageId, emoji);
+      const sourceConversationId = thread.find(({ id }) => id === messageId)?.conversationId ?? conversationId;
+      await addReaction(sourceConversationId, messageId, emoji);
     } catch (error) {
       setLoadError(errorMessage(error));
       await refreshThread();
     }
-  }, [conversationId, refreshThread]);
+  }, [conversationId, refreshThread, thread]);
+
+  const updateSendRoute = useCallback(async (sendConversationId: string | null) => {
+    if (!conversation || conversation.provider !== 'merged' || updatingRoute) return;
+    setUpdatingRoute(true);
+    setLoadError(undefined);
+    try {
+      await setProfileSendOverride(conversation.id, sendConversationId);
+      setConversation((current) => current ? {
+        ...current,
+        sendConversationId: sendConversationId ?? undefined,
+        sendRoute: sendConversationId ? 'override' : 'most_frequent',
+      } : current);
+      setShowRouteSettings(false);
+    } catch (error) {
+      setLoadError(errorMessage(error));
+    } finally {
+      if (mounted.current) setUpdatingRoute(false);
+    }
+  }, [conversation, updatingRoute]);
+
+  const confirmUnmerge = useCallback(() => {
+    if (!conversation || conversation.provider !== 'merged') return;
+    Alert.alert(
+      'Unmerge this profile?',
+      'The original direct messages will reappear separately. No messages will be deleted.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unmerge',
+          style: 'destructive',
+          onPress: () => void deleteProfileMerge(conversation.id)
+            .then(() => router.replace('/'))
+            .catch((error) => setLoadError(errorMessage(error))),
+        },
+      ],
+    );
+  }, [conversation]);
 
   if (loading && !conversation) {
     return <SafeAreaView style={styles.safeArea}><View style={styles.centered}><ActivityIndicator color={ACCENT} /></View></SafeAreaView>;
@@ -282,13 +338,42 @@ export default function ConversationScreen() {
             keyExtractor={(item) => item.id}
             keyboardShouldPersistTaps="handled"
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refreshThread(true)} tintColor={ACCENT} />}
-            renderItem={({ item }) => <MessageItem message={item} onReact={handleReaction} />}
+            renderItem={({ item }) => <MessageItem message={item} onReact={handleReaction} showProvider={conversation.provider === 'merged'} />}
             showsVerticalScrollIndicator={false}
             ListHeaderComponent={thread.length ? <View style={styles.dayMarker}><View style={styles.dayRule} /><Text style={styles.dayText}>Recent</Text><View style={styles.dayRule} /></View> : null}
-            ListEmptyComponent={<View style={styles.emptyThread}><Text style={styles.emptyThreadTitle}>Start the conversation</Text><Text style={styles.emptyThreadBody}>Messages sent here will go through {providerLabels[conversation.provider]}.</Text></View>}
+            ListEmptyComponent={<View style={styles.emptyThread}><Text style={styles.emptyThreadTitle}>Start the conversation</Text><Text style={styles.emptyThreadBody}>Messages sent here will go through {sendRouteLabel}.</Text></View>}
           />
 
           <View style={styles.composerShell}>
+            {showRouteSettings && conversation.sources?.length ? (
+              <View style={styles.routeSettings}>
+                <View style={styles.routeSettingsHeader}>
+                  <Text style={styles.routeSettingsTitle}>Send new messages through</Text>
+                  {updatingRoute ? <ActivityIndicator color={ACCENT} size="small" /> : null}
+                </View>
+                <Pressable
+                  disabled={updatingRoute}
+                  onPress={() => void updateSendRoute(null)}
+                  style={[styles.routeOption, !conversation.sendConversationId && styles.routeOptionSelected]}>
+                  <Text style={styles.routeOptionTitle}>Automatic</Text>
+                  <Text style={styles.routeOptionDetail}>Most frequented source</Text>
+                </Pressable>
+                {conversation.sources.map((source) => (
+                  <Pressable
+                    disabled={updatingRoute}
+                    key={source.conversationId}
+                    onPress={() => void updateSendRoute(source.conversationId)}
+                    style={[styles.routeOption, conversation.sendConversationId === source.conversationId && styles.routeOptionSelected]}>
+                    <View style={[styles.routeProviderDot, { backgroundColor: providerColors[source.provider] }]} />
+                    <Text style={styles.routeOptionTitle}>{providerLabels[source.provider]}</Text>
+                    <Text numberOfLines={1} style={styles.routeOptionDetail}>{source.title}</Text>
+                  </Pressable>
+                ))}
+                <Pressable onPress={confirmUnmerge} style={styles.unmergeButton}>
+                  <Text style={styles.unmergeText}>Unmerge profile</Text>
+                </Pressable>
+              </View>
+            ) : null}
             <View style={styles.composer}>
               <TextInput
                 accessibilityLabel="Message"
@@ -311,7 +396,14 @@ export default function ConversationScreen() {
                   : <SymbolView name={{ ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' }} size={20} tintColor="#FFF9F2" />}
               </Pressable>
             </View>
-            <Text style={styles.providerNote}>Sending via {providerLabels[conversation.provider]}</Text>
+            {conversation.provider === 'merged' ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Change sending provider"
+                onPress={() => setShowRouteSettings((current) => !current)}>
+                <Text style={styles.providerNote}>Sending via {sendRouteLabel} · Change</Text>
+              </Pressable>
+            ) : <Text style={styles.providerNote}>Sending via {sendRouteLabel}</Text>}
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -346,6 +438,8 @@ const styles = StyleSheet.create({
   messageColumn: { alignItems: 'flex-start', marginLeft: 9, maxWidth: '100%' },
   messageColumnMine: { alignItems: 'flex-end', marginLeft: 0 },
   author: { color: MUTED, fontSize: 12, fontWeight: '700', marginLeft: 3, marginBottom: 5 },
+  messageProvider: { color: '#9A6658', fontSize: 9, fontWeight: '800', letterSpacing: 0.7, marginLeft: 3, marginBottom: 4, textTransform: 'uppercase' },
+  messageProviderMine: { marginRight: 3 },
   bubble: { maxWidth: '100%', paddingHorizontal: 14, paddingTop: 11, paddingBottom: 8, borderRadius: 17 },
   bubbleOther: { backgroundColor: '#E9E4DB', borderBottomLeftRadius: 5 },
   bubbleMine: { backgroundColor: '#A64730', borderBottomRightRadius: 5 },
@@ -365,6 +459,16 @@ const styles = StyleSheet.create({
   reactionPressed: { backgroundColor: '#EAD8D0', borderColor: '#CDAE9F' },
   reactionText: { color: '#55514B', fontSize: 12, fontWeight: '600' },
   composerShell: { paddingHorizontal: 14, paddingTop: 10, paddingBottom: 9, borderTopWidth: 1, borderTopColor: '#DED9CF', backgroundColor: PAPER },
+  routeSettings: { marginBottom: 10, padding: 10, borderWidth: 1, borderColor: '#D9D4CA', borderRadius: 15, backgroundColor: '#FFFCF7', gap: 5 },
+  routeSettingsHeader: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 4 },
+  routeSettingsTitle: { color: INK, fontSize: 13, fontWeight: '800' },
+  routeOption: { minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, borderRadius: 10 },
+  routeOptionSelected: { backgroundColor: '#EAD8D0' },
+  routeProviderDot: { width: 8, height: 8, borderRadius: 4 },
+  routeOptionTitle: { color: INK, fontSize: 13, fontWeight: '700' },
+  routeOptionDetail: { flex: 1, color: MUTED, fontSize: 11, textAlign: 'right' },
+  unmergeButton: { minHeight: 36, alignItems: 'center', justifyContent: 'center', marginTop: 4, borderTopWidth: 1, borderTopColor: '#E5DFD5' },
+  unmergeText: { color: ACCENT, fontSize: 12, fontWeight: '700' },
   composer: { minHeight: 50, flexDirection: 'row', alignItems: 'flex-end', padding: 5, borderRadius: 18, borderWidth: 1, borderColor: '#D9D4CA', backgroundColor: '#FFFCF7' },
   input: { flex: 1, maxHeight: 110, minHeight: 38, paddingHorizontal: 10, paddingTop: Platform.OS === 'ios' ? 9 : 7, color: INK, fontSize: 15, lineHeight: 20 },
   sendButton: { width: 38, height: 38, borderRadius: 13, backgroundColor: ACCENT, alignItems: 'center', justifyContent: 'center' },

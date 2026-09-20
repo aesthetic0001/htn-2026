@@ -44,9 +44,11 @@ foreground updates are streamed from the backend with server-sent events (SSE); 
 
 ## roadmap
 
-- add muting
 - add profile merging (ie. one contact is found on several providers, we will merge their messages into one giant provider, sending to either their most frequented provider OR a user configured override)
+- add message deleting
+- add muting
 - clean up the ui
+- add reply features
 
 
 ## if there's time...

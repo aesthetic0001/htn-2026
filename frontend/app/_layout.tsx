@@ -55,6 +55,7 @@ function RootLayoutNav() {
       }}>
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#F6F3EC' } }}>
         <Stack.Screen name="index" />
+        <Stack.Screen name="merge" />
         <Stack.Screen name="conversation/[id]" />
       </Stack>
     </ThemeProvider>

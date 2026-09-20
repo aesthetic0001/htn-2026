@@ -1,4 +1,5 @@
 export type ProviderName = 'discord' | 'instagram';
+export type ConversationProvider = ProviderName | 'merged';
 
 export type ProviderState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -21,7 +22,7 @@ export interface ConversationNotification {
 
 export interface Conversation {
   id: string;
-  provider: ProviderName;
+  provider: ConversationProvider;
   providerConversationId: string;
   title: string;
   kind: 'direct' | 'group';
@@ -31,6 +32,29 @@ export interface Conversation {
   notification?: ConversationNotification;
   lastUpdatedAt?: string;
   lastAcknowledgedAt?: string;
+  sources?: ConversationSource[];
+  sendConversationId?: string;
+  sendRoute?: 'override' | 'most_frequent';
+}
+
+export interface ConversationSource {
+  conversationId: string;
+  provider: ProviderName;
+  title: string;
+  avatarUrl?: string;
+}
+
+export interface ProfileMerge {
+  id: string;
+  conversationIds: string[];
+  displayName?: string;
+  sendConversationId?: string;
+  createdAt: string;
+}
+
+export interface ProfileMergeCandidate extends Conversation {
+  provider: ProviderName;
+  assignedToProfileId?: string;
 }
 
 export interface Attachment {
