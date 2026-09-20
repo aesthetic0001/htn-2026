@@ -64,8 +64,9 @@ export function createApp(providerInput: EventProvider | readonly EventProvider[
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
         throw new AppError("limit must be an integer from 1 to 100", 400, "INVALID_REQUEST");
       }
+      const acknowledge = firstValue(request.query.acknowledge) === "true";
       const provider = providerForQualifiedId(providerByName, conversationId);
-      response.json({ messages: await provider.listMessages(conversationId, limit) });
+      response.json({ messages: await provider.listMessages(conversationId, limit, acknowledge) });
     }),
   );
 

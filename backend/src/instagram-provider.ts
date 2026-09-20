@@ -3,6 +3,13 @@ import { EventEmitter } from "node:events";
 import type { BrowserContext, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { AsyncLock } from "./async-lock.js";
+import {
+  conversationNotificationChanged,
+  extractInstagramConversationPreview,
+  instagramConversationNotification,
+} from "./conversation-notification.js";
+import { applyProviderConversationOrder } from "./conversation-order.js";
+import { ConversationReadTracker } from "./conversation-read-tracker.js";
 import { AppError, errorMessage } from "./errors.js";
 import type {
   Attachment,
@@ -33,7 +40,8 @@ interface RawInstagramConversation {
   label: string;
   imageAlts: string[];
   avatarUrl?: string;
-  unread: boolean;
+  notificationCopy: string;
+  hasUnreadIndicator: boolean;
 }
 
 interface InstagramThreadRow extends Omit<RawInstagramConversation, "threadId" | "path"> {
@@ -87,6 +95,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
   private state: ReturnType<MessageProvider["status"]> = { state: "disconnected" };
   private readonly lock = new AsyncLock();
   private readonly conversations = new Map<string, DiscoveredConversation>();
+  private readonly readTracker = new ConversationReadTracker();
   private conversationSnapshotInitialized = false;
   private readonly messageDomReferences = new Map<string, MessageDomReference>();
   private pollTimer?: NodeJS.Timeout;
@@ -141,13 +150,16 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     return this.lock.run(async () => {
       await this.discoverConversations(this.connectedPage());
       return [...this.conversations.values()]
-        .map(({ path: _path, ...conversation }) => conversation)
-        .sort((a, b) => a.title.localeCompare(b.title));
+        .map(({ path: _path, ...conversation }) => conversation);
     });
   }
 
-  async listMessages(conversationId: string, limit: number): Promise<Message[]> {
-    return this.lock.run(() => this.readMessages(this.connectedPage(), conversationId, limit));
+  async listMessages(conversationId: string, limit: number, acknowledge = false): Promise<Message[]> {
+    return this.lock.run(async () => {
+      const messages = await this.readMessages(this.connectedPage(), conversationId, limit);
+      this.updateConversationFromMessages(conversationId, messages, acknowledge, true);
+      return messages;
+    });
   }
 
   async sendMessage(conversationId: string, input: SendMessageInput): Promise<Message> {
@@ -304,7 +316,6 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           '[aria-label*="unread" i]',
           '[aria-label*="new message" i]',
           '[aria-label*="notification" i]',
-          '[role="status"]',
         ].join(", ")));
         const hasVisualBubble = [...row.querySelectorAll("div, span")].some((candidate) => {
           const element = candidate as HTMLElement;
@@ -315,8 +326,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           const channels = color.match(/[\d.]+/g)?.slice(0, 3).map(Number);
           if (!channels || channels.length < 3) return false;
           const [red = 0, green = 0, blue = 0] = channels;
-          return (blue >= 180 && blue > red + 50 && blue > green + 30)
-            || (red >= 200 && green < 120 && blue < 150);
+          return blue >= 180 && blue > red + 50 && blue > green + 30;
         });
         return [{
           threadId: match[1],
@@ -325,9 +335,8 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           label: anchor.getAttribute("aria-label") || "",
           imageAlts,
           avatarUrl: (anchor.querySelector("img") as HTMLImageElement | null)?.src,
-          unread: /\b(?:unread|new message|notification)\b/i.test(notificationCopy)
-            || hasAccessibleIndicator
-            || hasVisualBubble,
+          notificationCopy,
+          hasUnreadIndicator: hasAccessibleIndicator || hasVisualBubble,
         }];
       }),
     );
@@ -335,13 +344,15 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
 
   private applyDiscoveredConversations(links: RawInstagramConversation[], emitChanges: boolean): void {
     const uniqueLinks = new Map<string, RawInstagramConversation>();
+    const discoveredConversationIds: string[] = [];
     for (const link of links) {
       const existing = uniqueLinks.get(link.threadId);
       uniqueLinks.set(link.threadId, existing ? {
         ...existing,
         ...link,
         avatarUrl: link.avatarUrl || existing.avatarUrl,
-        unread: existing.unread || link.unread,
+        notificationCopy: `${existing.notificationCopy} ${link.notificationCopy}`,
+        hasUnreadIndicator: existing.hasUnreadIndicator || link.hasUnreadIndicator,
       } : link);
     }
 
@@ -352,41 +363,63 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           conversation.path === link.path
           || (link.avatarUrl && conversation.avatarUrl === link.avatarUrl && conversation.title === title));
       const id = previous?.id ?? this.conversationId(link.threadId);
-      const conversation: DiscoveredConversation = {
+      const preview = extractInstagramConversationPreview(link.text, title);
+      const notificationState = instagramConversationNotification(
+        link.text,
+        link.notificationCopy,
+        link.hasUnreadIndicator,
+      );
+      this.readTracker.observeNativeNotification(id, notificationState.notification, preview);
+      const conversation = this.readTracker.apply<DiscoveredConversation>({
         id,
         provider: "instagram",
         providerConversationId: previous?.providerConversationId ?? link.threadId,
         title,
         kind: link.imageAlts.length > 1 || /\bgroup\b/i.test(link.label) ? "group" : "direct",
         ...(link.avatarUrl ? { avatarUrl: link.avatarUrl } : {}),
-        unread: link.unread,
+        ...(preview ? { preview } : {}),
+        ...notificationState,
         path: link.path,
-      };
+      });
       this.conversations.set(id, conversation);
+      discoveredConversationIds.push(id);
       this.emitConversationChange(previous, conversation, emitChanges);
     }
+    applyProviderConversationOrder(this.conversations, discoveredConversationIds);
     if (uniqueLinks.size > 0) this.conversationSnapshotInitialized = true;
   }
 
   private applyThreadRows(rows: InstagramThreadRow[], emitChanges: boolean): void {
+    const discoveredConversationIds: string[] = [];
     for (const row of rows) {
       const title = normalizeInstagramConversationTitle(row.text, row.label, row.imageAlts, "");
       const previous = [...this.conversations.values()].find((conversation) =>
         (row.avatarUrl && conversation.avatarUrl === row.avatarUrl) || conversation.title === title);
       const rowProviderId = instagramThreadRowProviderId(title, row.avatarUrl, row.imageAlts);
-      const conversation: DiscoveredConversation = {
+      const preview = extractInstagramConversationPreview(row.text, title);
+      const notificationState = instagramConversationNotification(
+        row.text,
+        row.notificationCopy,
+        row.hasUnreadIndicator,
+      );
+      const conversationId = previous?.id ?? this.conversationId(rowProviderId);
+      this.readTracker.observeNativeNotification(conversationId, notificationState.notification, preview);
+      const conversation = this.readTracker.apply<DiscoveredConversation>({
         ...previous,
-        id: previous?.id ?? this.conversationId(rowProviderId),
+        id: conversationId,
         provider: "instagram",
         providerConversationId: previous?.providerConversationId ?? rowProviderId,
         title,
         kind: row.imageAlts.length > 1 || /\bgroup\b/i.test(row.label) ? "group" : "direct",
         ...(row.avatarUrl ? { avatarUrl: row.avatarUrl } : {}),
-        unread: row.unread,
-      };
+        ...(preview ? { preview } : {}),
+        ...notificationState,
+      });
       this.conversations.set(conversation.id, conversation);
+      discoveredConversationIds.push(conversation.id);
       this.emitConversationChange(previous, conversation, emitChanges);
     }
+    applyProviderConversationOrder(this.conversations, discoveredConversationIds);
     if (rows.length > 0 && this.conversations.size > 0) this.conversationSnapshotInitialized = true;
   }
 
@@ -396,8 +429,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     emitChanges: boolean,
   ): void {
     if (!emitChanges || !this.conversationSnapshotInitialized
-      || (!previous && !conversation.unread)
-      || (previous && previous.unread === conversation.unread)) return;
+      || !conversationNotificationChanged(previous, conversation)) return;
     const { path: _path, ...publicConversation } = conversation;
     this.emitEvent("conversation.updated", publicConversation);
   }
@@ -418,7 +450,6 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           '[aria-label*="unread" i]',
           '[aria-label*="new message" i]',
           '[aria-label*="notification" i]',
-          '[role="status"]',
         ].join(", ")));
         const hasVisualBubble = [...button.querySelectorAll("div, span")].some((candidate) => {
           const element = candidate as HTMLElement;
@@ -429,8 +460,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           const channels = color.match(/[\d.]+/g)?.slice(0, 3).map(Number);
           if (!channels || channels.length < 3) return false;
           const [red = 0, green = 0, blue = 0] = channels;
-          return (blue >= 180 && blue > red + 50 && blue > green + 30)
-            || (red >= 200 && green < 120 && blue < 150);
+          return blue >= 180 && blue > red + 50 && blue > green + 30;
         });
         return [{
           index,
@@ -438,9 +468,8 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           label,
           imageAlts: images.map((image) => image.getAttribute("alt") || "").filter(Boolean),
           ...(images[0]?.src ? { avatarUrl: images[0].src } : {}),
-          unread: /\b(?:unread|new message|notification)\b/i.test(notificationCopy)
-            || hasAccessibleIndicator
-            || hasVisualBubble,
+          notificationCopy,
+          hasUnreadIndicator: hasAccessibleIndicator || hasVisualBubble,
         }];
       }),
     );
@@ -528,6 +557,25 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     return messages.slice(-limit);
   }
 
+  private updateConversationFromMessages(
+    conversationId: string,
+    messages: readonly Message[],
+    acknowledge: boolean,
+    emitChanges: boolean,
+  ): void {
+    this.readTracker.observeMessages(conversationId, messages);
+    if (acknowledge) this.readTracker.acknowledge(conversationId);
+    const previous = this.conversations.get(conversationId);
+    if (!previous) return;
+
+    const conversation = this.readTracker.apply(previous);
+    this.conversations.set(conversationId, conversation);
+    if (emitChanges && conversationNotificationChanged(previous, conversation)) {
+      const { path: _path, ...publicConversation } = conversation;
+      this.emitEvent("conversation.updated", publicConversation);
+    }
+  }
+
   private startPolling(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = setInterval(() => void this.pollNativeNotifications(), this.options.pollIntervalMs);
@@ -540,10 +588,18 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     try {
       await this.lock.run(async () => {
         const page = this.connectedPage();
-        if (!new URL(page.url()).pathname.startsWith("/direct/")) return;
+        const currentPath = new URL(page.url()).pathname;
+        if (!currentPath.startsWith("/direct/")) return;
         const links = await this.findThreadLinks(page);
         if (links.length > 0) this.applyDiscoveredConversations(links, true);
         else this.applyThreadRows(await this.findThreadRows(page), true);
+        if (!/^\/direct\/t\/[^/?#]+\/?$/.test(currentPath)) return;
+        const activeConversation = [...this.conversations.values()].find(
+          (conversation) => conversation.path === currentPath,
+        );
+        if (!activeConversation) return;
+        const messages = await this.scrapeVisibleMessages(page, activeConversation.id, 100);
+        this.updateConversationFromMessages(activeConversation.id, messages, false, true);
       });
     } catch {
       // Native notification polling is best-effort and must not disconnect the provider.

@@ -23,13 +23,36 @@ const INK = '#242320';
 const MUTED = '#7B776F';
 const PAPER = '#F6F3EC';
 const ACCENT = '#B44D32';
+const DISCORD_NOTIFICATION = '#DA373C';
+const INSTAGRAM_NOTIFICATION = '#0095F6';
 const POLL_INTERVAL_MS = 15_000;
 
+function ConversationNotificationIndicator({ conversation }: { conversation: Conversation }) {
+  if (!conversation.unread) return null;
+  if (conversation.provider === 'instagram') {
+    return <View accessibilityLabel="Unread Instagram messages" style={styles.instagramUnreadDot} />;
+  }
+
+  const count = conversation.notification?.count;
+  return (
+    <View
+      accessibilityLabel={count ? `${count} Discord mentions` : 'Unread Discord messages'}
+      style={[styles.discordUnreadBadge, !count && styles.discordUnreadDot]}>
+      {count ? <Text style={styles.discordUnreadCount}>{count > 99 ? '99+' : count}</Text> : null}
+    </View>
+  );
+}
+
 function ConversationRow({ conversation }: { conversation: Conversation }) {
+  const notificationLabel = conversation.unread
+    ? conversation.notification?.count
+      ? `, ${conversation.notification.count} unread mentions`
+      : ', unread messages'
+    : '';
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open conversation with ${conversation.title}`}
+      accessibilityLabel={`Open conversation with ${conversation.title}${notificationLabel}`}
       onPress={() => router.push({ pathname: '/conversation/[id]', params: { id: conversation.id } })}
       style={({ pressed }) => [styles.conversationRow, pressed && styles.rowPressed]}>
       <View>
@@ -49,9 +72,9 @@ function ConversationRow({ conversation }: { conversation: Conversation }) {
 
         <View style={styles.rowBottomLine}>
           <Text numberOfLines={1} style={[styles.preview, conversation.unread && styles.unreadPreview]}>
-            {conversation.kind === 'group' ? 'Group conversation' : 'Direct message'}
+            {conversation.preview ?? (conversation.kind === 'group' ? 'Group conversation' : 'Direct message')}
           </Text>
-          {conversation.unread ? <View style={styles.unreadDot} /> : null}
+          <ConversationNotificationIndicator conversation={conversation} />
         </View>
       </View>
     </Pressable>
@@ -144,6 +167,7 @@ export default function InboxScreen() {
       const matchesFilter = filter === 'all' || conversation.unread;
       const matchesQuery = !normalizedQuery
         || conversation.title.toLowerCase().includes(normalizedQuery)
+        || conversation.preview?.toLowerCase().includes(normalizedQuery)
         || providerLabels[conversation.provider].toLowerCase().includes(normalizedQuery);
       return matchesFilter && matchesQuery;
     });
@@ -277,7 +301,10 @@ const styles = StyleSheet.create({
   unreadTime: { color: ACCENT, fontWeight: '700' },
   preview: { flex: 1, color: MUTED, fontSize: 14, lineHeight: 18 },
   unreadPreview: { color: '#4E4B46', fontWeight: '500' },
-  unreadDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: ACCENT, marginRight: 3 },
+  instagramUnreadDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: INSTAGRAM_NOTIFICATION, marginRight: 3 },
+  discordUnreadBadge: { minWidth: 20, height: 20, paddingHorizontal: 5, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: DISCORD_NOTIFICATION, marginRight: 1 },
+  discordUnreadDot: { minWidth: 10, width: 10, height: 10, paddingHorizontal: 0, borderRadius: 5, marginRight: 3 },
+  discordUnreadCount: { color: '#FFFFFF', fontSize: 10, lineHeight: 13, fontWeight: '800' },
   separator: { height: 1, marginLeft: 74, backgroundColor: '#E3DED5' },
   emptyState: { flex: 1, minHeight: 260, alignItems: 'center', justifyContent: 'center', padding: 24 },
   emptyTitle: { color: INK, fontSize: 18, fontWeight: '700', marginBottom: 6 },

@@ -69,9 +69,9 @@ export async function getConversations(): Promise<Conversation[]> {
   return body.conversations;
 }
 
-export async function getMessages(conversationId: string, limit = 100): Promise<Message[]> {
+export async function getMessages(conversationId: string, limit = 100, acknowledge = false): Promise<Message[]> {
   const body = await request<{ messages: Message[] }>(
-    `/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=${limit}`,
+    `/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=${limit}&acknowledge=${acknowledge}`,
   );
   return body.messages.sort((left, right) =>
     new Date(left.sentAt).getTime() - new Date(right.sentAt).getTime());

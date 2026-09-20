@@ -2,6 +2,12 @@ import { EventEmitter } from "node:events";
 import type { BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { AsyncLock } from "./async-lock.js";
+import {
+  conversationNotificationChanged,
+  discordConversationNotification,
+} from "./conversation-notification.js";
+import { applyProviderConversationOrder } from "./conversation-order.js";
+import { ConversationReadTracker } from "./conversation-read-tracker.js";
 import { normalizeDiscordConversationTitle } from "./discord-conversation-title.js";
 import {
   normalizeDiscordMessages,
@@ -35,7 +41,10 @@ interface RawDiscordConversation {
   label: string;
   avatarUrl?: string;
   kind: "direct" | "group";
-  unread: boolean;
+  notificationCopy: string;
+  indicatorCopy: string;
+  hasUnreadIndicator: boolean;
+  hasMentionIndicator: boolean;
 }
 
 const DISCORD_ORIGIN = "https://discord.com";
@@ -49,6 +58,7 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
   private state: ReturnType<MessageProvider["status"]> = { state: "disconnected" };
   private readonly lock = new AsyncLock();
   private readonly conversations = new Map<string, DiscoveredConversation>();
+  private readonly readTracker = new ConversationReadTracker();
   private currentUser?: DiscordUserIdentity;
   private conversationSnapshotInitialized = false;
   private pollTimer?: NodeJS.Timeout;
@@ -106,13 +116,16 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
       const page = this.connectedPage();
       await this.discoverConversations(page);
       return [...this.conversations.values()]
-        .map(({ path: _path, ...conversation }) => conversation)
-        .sort((a, b) => a.title.localeCompare(b.title));
+        .map(({ path: _path, ...conversation }) => conversation);
     });
   }
 
-  async listMessages(conversationId: string, limit: number): Promise<Message[]> {
-    return this.lock.run(() => this.readMessages(this.connectedPage(), conversationId, limit));
+  async listMessages(conversationId: string, limit: number, acknowledge = false): Promise<Message[]> {
+    return this.lock.run(async () => {
+      const messages = await this.readMessages(this.connectedPage(), conversationId, limit);
+      this.updateConversationFromMessages(conversationId, messages, acknowledge, true);
+      return messages;
+    });
   }
 
   async sendMessage(conversationId: string, input: SendMessageInput): Promise<Message> {
@@ -253,14 +266,20 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         const text = anchor.textContent || label;
         const row = anchor.closest('[role="listitem"], li') || anchor.parentElement;
         const notificationCopy = `${anchor.getAttribute("aria-label") || ""} ${row?.getAttribute("aria-label") || ""}`;
-        const hasNotificationIndicator = Boolean(row?.querySelector([
-          '[class*="unread" i]',
+        const mentionIndicator = row?.querySelector([
           '[class*="mention" i]',
           '[class*="numberBadge" i]',
-          '[aria-label*="unread" i]',
           '[aria-label*="mention" i]',
+        ].join(", "));
+        const unreadIndicator = row?.querySelector([
+          '[class*="unread" i]',
+          '[aria-label*="unread" i]',
           '[aria-label*="notification" i]',
-        ].join(", ")));
+        ].join(", "));
+        const indicator = mentionIndicator || unreadIndicator;
+        const indicatorCopy = indicator
+          ? `${indicator.textContent || ""} ${indicator.getAttribute("aria-label") || ""} ${indicator.getAttribute("title") || ""}`
+          : "";
         const participantCount = text.match(/\b(\d+)\s+members?\b/i)?.[1];
         return [{
           channelId: match[1],
@@ -270,7 +289,10 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
           kind: participantCount || /(?:\(|,\s*)group (?:message|chat)\b/i.test(label)
             ? "group" as const
             : "direct" as const,
-          unread: /\b(?:unread|mention|notification)\b/i.test(notificationCopy) || hasNotificationIndicator,
+          notificationCopy,
+          indicatorCopy,
+          hasUnreadIndicator: Boolean(unreadIndicator || mentionIndicator),
+          hasMentionIndicator: Boolean(mentionIndicator),
         }];
       }),
     );
@@ -282,30 +304,44 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         ...existing,
         ...link,
         avatarUrl: link.avatarUrl || existing.avatarUrl,
-        unread: existing.unread || link.unread,
+        notificationCopy: `${existing.notificationCopy} ${link.notificationCopy}`,
+        indicatorCopy: `${existing.indicatorCopy} ${link.indicatorCopy}`,
+        hasUnreadIndicator: existing.hasUnreadIndicator || link.hasUnreadIndicator,
+        hasMentionIndicator: existing.hasMentionIndicator || link.hasMentionIndicator,
       } : link);
     }
 
     for (const link of uniqueLinks.values()) {
       const id = this.conversationId(link.channelId);
       const previous = this.conversations.get(id);
-      const conversation: DiscoveredConversation = {
+      const notificationState = discordConversationNotification(
+        link.notificationCopy,
+        link.indicatorCopy,
+        link.hasUnreadIndicator,
+        link.hasMentionIndicator,
+      );
+      this.readTracker.observeNativeNotification(id, notificationState.notification);
+      const conversation = this.readTracker.apply<DiscoveredConversation>({
         id,
         provider: "discord",
         providerConversationId: link.channelId,
         title: normalizeDiscordConversationTitle(link.label),
         kind: link.kind,
         avatarUrl: link.avatarUrl,
-        unread: link.unread,
+        ...notificationState,
         path: link.path,
-      };
+      });
       this.conversations.set(id, conversation);
       if (emitChanges && this.conversationSnapshotInitialized
-        && ((!previous && conversation.unread) || (previous && previous.unread !== conversation.unread))) {
+        && conversationNotificationChanged(previous, conversation)) {
         const { path: _path, ...publicConversation } = conversation;
         this.emitEvent("conversation.updated", publicConversation);
       }
     }
+    applyProviderConversationOrder(
+      this.conversations,
+      [...uniqueLinks.keys()].map((channelId) => this.conversationId(channelId)),
+    );
     if (uniqueLinks.size > 0) this.conversationSnapshotInitialized = true;
   }
 
@@ -418,6 +454,25 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
     return normalizeDiscordMessages(rawMessages, conversationId, limit, this.currentUser);
   }
 
+  private updateConversationFromMessages(
+    conversationId: string,
+    messages: readonly Message[],
+    acknowledge: boolean,
+    emitChanges: boolean,
+  ): void {
+    this.readTracker.observeMessages(conversationId, messages);
+    if (acknowledge) this.readTracker.acknowledge(conversationId);
+    const previous = this.conversations.get(conversationId);
+    if (!previous) return;
+
+    const conversation = this.readTracker.apply(previous);
+    this.conversations.set(conversationId, conversation);
+    if (emitChanges && conversationNotificationChanged(previous, conversation)) {
+      const { path: _path, ...publicConversation } = conversation;
+      this.emitEvent("conversation.updated", publicConversation);
+    }
+  }
+
   private startPolling(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = setInterval(() => void this.pollNativeNotifications(), this.options.pollIntervalMs);
@@ -432,6 +487,12 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         const page = this.connectedPage();
         if (!new URL(page.url()).pathname.startsWith("/channels/@me")) return;
         await this.collectDirectConversationLinks(page, true);
+        const activeChannelId = new URL(page.url()).pathname.match(CHANNEL_PATH)?.[1];
+        if (!activeChannelId) return;
+        const conversationId = this.conversationId(activeChannelId);
+        if (!this.conversations.has(conversationId)) return;
+        const messages = await this.scrapeVisibleMessages(page, conversationId, 100);
+        this.updateConversationFromMessages(conversationId, messages, false, true);
       });
     } catch {
       // Native notification polling is best-effort and must not disconnect the provider.

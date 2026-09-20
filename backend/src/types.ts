@@ -13,6 +13,11 @@ export interface Participant {
   avatarUrl?: string;
 }
 
+export interface ConversationNotification {
+  kind: "unread" | "mention";
+  count?: number;
+}
+
 export interface Conversation {
   id: string;
   provider: ProviderName;
@@ -21,6 +26,10 @@ export interface Conversation {
   kind: "direct" | "group";
   avatarUrl?: string;
   unread: boolean;
+  preview?: string;
+  notification?: ConversationNotification;
+  lastUpdatedAt?: string;
+  lastAcknowledgedAt?: string;
 }
 
 export interface Attachment {
@@ -52,7 +61,7 @@ export interface MessageProvider {
   disconnect(): Promise<void>;
   status(): ProviderStatus;
   listConversations(): Promise<Conversation[]>;
-  listMessages(conversationId: string, limit: number): Promise<Message[]>;
+  listMessages(conversationId: string, limit: number, acknowledge?: boolean): Promise<Message[]>;
   sendMessage(conversationId: string, input: SendMessageInput): Promise<Message>;
   addReaction(conversationId: string, messageId: string, emoji: string): Promise<void>;
 }

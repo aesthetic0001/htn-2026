@@ -50,6 +50,7 @@ function instagramFixture() {
 class FakeProvider extends EventEmitter implements MessageProvider {
   sent?: SendMessageInput;
   connectCalls = 0;
+  messageAcknowledgements: boolean[] = [];
   constructor(
     readonly name: ProviderName,
     private readonly conversation: Conversation,
@@ -59,7 +60,10 @@ class FakeProvider extends EventEmitter implements MessageProvider {
   async connect() { this.connectCalls += 1; }
   async disconnect() {}
   async listConversations() { return [this.conversation]; }
-  async listMessages() { return [this.message]; }
+  async listMessages(_conversationId: string, _limit: number, acknowledge = false) {
+    this.messageAcknowledgements.push(acknowledge);
+    return [this.message];
+  }
   async sendMessage(_id: string, input: SendMessageInput) {
     this.sent = input;
     return { ...this.message, content: input.content };
@@ -106,6 +110,12 @@ test("lists normalized conversations and messages", async () => {
 
   const instagramMessages = await fetch(`${baseUrl}/api/conversations/instagram%3Aabc/messages?limit=20`);
   assert.deepEqual(await instagramMessages.json(), { messages: [instagram.message] });
+
+  const acknowledgedMessages = await fetch(
+    `${baseUrl}/api/conversations/discord%3A123/messages?limit=20&acknowledge=true`,
+  );
+  assert.equal(acknowledgedMessages.status, 200);
+  assert.deepEqual(discordProvider.messageAcknowledgements.slice(-2), [false, true]);
 });
 
 test("validates and sends messages", async () => {

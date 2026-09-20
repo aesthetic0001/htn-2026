@@ -43,7 +43,7 @@ scraping done with playwright + custom built chromium to prevent automation dete
 
 ## roadmap
 
-- add muting, notifications, 
+- add muting
 - add profile merging (ie. one contact is found on several providers, we will merge their messages into one giant provider, sending to either their most frequented provider OR a user configured override)
 - clean up the ui
 

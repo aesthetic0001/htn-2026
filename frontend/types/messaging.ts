@@ -14,6 +14,11 @@ export interface Participant {
   avatarUrl?: string;
 }
 
+export interface ConversationNotification {
+  kind: 'unread' | 'mention';
+  count?: number;
+}
+
 export interface Conversation {
   id: string;
   provider: ProviderName;
@@ -22,6 +27,10 @@ export interface Conversation {
   kind: 'direct' | 'group';
   avatarUrl?: string;
   unread: boolean;
+  preview?: string;
+  notification?: ConversationNotification;
+  lastUpdatedAt?: string;
+  lastAcknowledgedAt?: string;
 }
 
 export interface Attachment {

@@ -111,7 +111,7 @@ export default function ConversationScreen() {
     requestInFlight.current = true;
     if (showRefresh) setRefreshing(true);
     try {
-      const messages = await getMessages(conversationId);
+      const messages = await getMessages(conversationId, 100, true);
       if (!mounted.current) return;
       setThread(messages);
       setLoadError(undefined);
@@ -130,7 +130,10 @@ export default function ConversationScreen() {
     }
     setLoading(true);
     try {
-      const [conversations, messages] = await Promise.all([getConversations(), getMessages(conversationId)]);
+      const [conversations, messages] = await Promise.all([
+        getConversations(),
+        getMessages(conversationId, 100, true),
+      ]);
       if (!mounted.current) return;
       setConversation(conversations.find((item) => item.id === conversationId));
       setThread(messages);

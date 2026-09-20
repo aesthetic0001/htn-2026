@@ -39,7 +39,7 @@ If a provider requests CAPTCHA, MFA, or a login challenge, complete it in the op
 
 ## Shared model
 
-The public conversation/message model is the common subset supported by both providers. It includes direct and group conversations, unread state, text and media attachments, edit metadata, and emoji reactions. Discord-only metadata such as presence, mute state, and member counts is deliberately not exposed.
+The public conversation/message model is the common subset supported by both providers. It includes direct and group conversations, provider-native unread notification state, conversation previews, text and media attachments, edit metadata, and emoji reactions. Discord mention badges/counts and Instagram preview/blue-dot state are normalized on each conversation. `lastUpdatedAt` advances for native notification changes and newly observed incoming messages; `lastAcknowledgedAt` only catches up when a focused Providence thread acknowledges the messages. Discord-only metadata such as presence, mute state, and member counts is deliberately not exposed.
 
 ## API
 
@@ -47,9 +47,9 @@ The public conversation/message model is the common subset supported by both pro
 - `GET /api/providers`
 - `POST /api/providers/:provider/connect` where `provider` is `discord` or `instagram`
 - `GET /api/conversations`
-- `GET /api/conversations/:conversationId/messages?limit=50`
+- `GET /api/conversations/:conversationId/messages?limit=50&acknowledge=true` (`acknowledge` is only sent by a focused Providence thread)
 - `POST /api/conversations/:conversationId/messages` with `{ "content": "..." }`
 - `POST /api/conversations/:conversationId/messages/:messageId/reactions` with `{ "emoji": "..." }`
-- `GET /api/events` for server-sent `provider.status` and `message.created` events
+- `GET /api/events` for server-sent `provider.status`, `conversation.updated`, and `message.created` events
 
 Conversation and message IDs are provider-qualified (for example, `discord:123` or `instagram:abc`). URL-encode IDs when placing them in route parameters. Conversation routes dispatch to the provider named by the ID prefix; unavailable providers do not prevent connected providers from being listed.
