@@ -3,6 +3,7 @@ import type { BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { AsyncLock } from "./async-lock.js";
 import { normalizeDiscordConversationTitle } from "./discord-conversation-title.js";
+import { normalizeDiscordMessages } from "./discord-message-normalizer.js";
 import { AppError, errorMessage } from "./errors.js";
 import type {
   Conversation,
@@ -318,10 +319,17 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
       nodes.map((node) => {
         const element = node as HTMLElement;
         const rawId = element.id || element.dataset.listItemId || "";
-        const id = rawId.match(/(\d{15,25})$/)?.[1] || rawId;
+        const id = rawId.match(/(\d{15,25})$/)?.[1] || "";
         const authorNode = element.querySelector('[class*="username"], [class*="headerText"]');
         const avatar = element.querySelector('img[class*="avatar"]') as HTMLImageElement | null;
         const time = element.querySelector("time") as HTMLTimeElement | null;
+        const labelledBy = element.getAttribute("aria-labelledby")
+          || element.querySelector("[aria-labelledby]")?.getAttribute("aria-labelledby")
+          || "";
+        const labelledAuthor = labelledBy
+          .split(/\s+/)
+          .map((labelId) => document.getElementById(labelId))
+          .find((label) => label && /username/i.test(`${label.id} ${label.className}`));
         const contentNodes = [...element.querySelectorAll('[class*="markup"]')];
         const content = contentNodes.map((part) => part.textContent || "").join("\n").trim();
         const attachmentLinks = [...element.querySelectorAll('a[href]')]
@@ -336,10 +344,10 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         });
         return {
           id,
-          author: authorNode?.textContent?.trim() || "Unknown Discord user",
+          author: authorNode?.textContent?.trim() || labelledAuthor?.textContent?.trim(),
           avatarUrl: avatar?.src,
           content,
-          timestamp: time?.dateTime || time?.getAttribute("datetime") || new Date().toISOString(),
+          timestamp: time?.dateTime || time?.getAttribute("datetime") || undefined,
           edited: /edited/i.test(element.textContent || ""),
           attachments: attachmentLinks,
           reactions,
@@ -347,23 +355,7 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
       }),
     );
 
-    const unique = new Map<string, Message>();
-    for (const raw of rawMessages) {
-      if (!raw.id) continue;
-      unique.set(raw.id, {
-        id: this.messageId(raw.id),
-        provider: "discord",
-        providerMessageId: raw.id,
-        conversationId,
-        author: { displayName: raw.author, avatarUrl: raw.avatarUrl },
-        content: raw.content,
-        sentAt: raw.timestamp,
-        edited: raw.edited,
-        attachments: raw.attachments,
-        reactions: raw.reactions,
-      });
-    }
-    return [...unique.values()].slice(-limit);
+    return normalizeDiscordMessages(rawMessages, conversationId, limit);
   }
 
   private startPolling(): void {
@@ -402,10 +394,6 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
   }
 
   private conversationId(providerId: string): string {
-    return `discord:${providerId}`;
-  }
-
-  private messageId(providerId: string): string {
     return `discord:${providerId}`;
   }
 
