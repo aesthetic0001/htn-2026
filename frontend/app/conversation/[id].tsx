@@ -26,13 +26,17 @@ import {
   getMessages,
   sendMessage,
 } from '@/services/api';
+import {
+  realtimeConversationId,
+  subscribeToRealtimeEvents,
+} from '@/services/realtime';
 import type { Conversation, Message, SendMessageInput } from '@/types/messaging';
 
 const INK = '#242320';
 const MUTED = '#7B776F';
 const PAPER = '#F6F3EC';
 const ACCENT = '#B44D32';
-const POLL_INTERVAL_MS = 5_000;
+const FALLBACK_POLL_INTERVAL_MS = 60_000;
 
 function messageTime(value: string) {
   return new Intl.DateTimeFormat('en', { hour: 'numeric', minute: '2-digit' }).format(new Date(value));
@@ -103,20 +107,30 @@ export default function ConversationScreen() {
   const [sending, setSending] = useState(false);
   const [loadError, setLoadError] = useState<string>();
   const requestInFlight = useRef(false);
+  const refreshQueued = useRef(false);
   const mounted = useRef(true);
   const { width } = useWindowDimensions();
 
   const refreshThread = useCallback(async (showRefresh = false) => {
-    if (!conversationId || requestInFlight.current) return;
+    if (!conversationId) return;
+    if (requestInFlight.current) {
+      refreshQueued.current = true;
+      return;
+    }
     requestInFlight.current = true;
     if (showRefresh) setRefreshing(true);
     try {
-      const messages = await getMessages(conversationId, 100, true);
-      if (!mounted.current) return;
-      setThread(messages);
-      setLoadError(undefined);
-    } catch (error) {
-      if (mounted.current) setLoadError(errorMessage(error));
+      do {
+        refreshQueued.current = false;
+        try {
+          const messages = await getMessages(conversationId, 100, true);
+          if (!mounted.current) return;
+          setThread(messages);
+          setLoadError(undefined);
+        } catch (error) {
+          if (mounted.current) setLoadError(errorMessage(error));
+        }
+      } while (mounted.current && refreshQueued.current);
     } finally {
       requestInFlight.current = false;
       if (mounted.current) setRefreshing(false);
@@ -128,33 +142,55 @@ export default function ConversationScreen() {
       setLoading(false);
       return;
     }
+    if (requestInFlight.current) {
+      refreshQueued.current = true;
+      return;
+    }
+    requestInFlight.current = true;
     setLoading(true);
     try {
-      const [conversations, messages] = await Promise.all([
-        getConversations(),
-        getMessages(conversationId, 100, true),
-      ]);
-      if (!mounted.current) return;
-      setConversation(conversations.find((item) => item.id === conversationId));
-      setThread(messages);
-      setLoadError(undefined);
-    } catch (error) {
-      if (mounted.current) setLoadError(errorMessage(error));
+      do {
+        refreshQueued.current = false;
+        try {
+          const [conversations, messages] = await Promise.all([
+            getConversations(),
+            getMessages(conversationId, 100, true),
+          ]);
+          if (!mounted.current) return;
+          setConversation(conversations.find((item) => item.id === conversationId));
+          setThread(messages);
+          setLoadError(undefined);
+        } catch (error) {
+          if (mounted.current) setLoadError(errorMessage(error));
+        }
+      } while (mounted.current && refreshQueued.current);
     } finally {
-      if (mounted.current) setLoading(false);
+      requestInFlight.current = false;
+      if (mounted.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [conversationId]);
 
   useFocusEffect(useCallback(() => {
     mounted.current = true;
     const initialLoad = setTimeout(() => void loadConversation(), 0);
-    const poller = setInterval(() => void refreshThread(), POLL_INTERVAL_MS);
+    const unsubscribe = subscribeToRealtimeEvents((event) => {
+      if (event.type === 'ready') {
+        void loadConversation();
+      } else if (realtimeConversationId(event) === conversationId) {
+        void refreshThread();
+      }
+    });
+    const poller = setInterval(() => void loadConversation(), FALLBACK_POLL_INTERVAL_MS);
     return () => {
       mounted.current = false;
       clearTimeout(initialLoad);
       clearInterval(poller);
+      unsubscribe();
     };
-  }, [loadConversation, refreshThread]));
+  }, [conversationId, loadConversation, refreshThread]));
 
   const subtitle = useMemo(() => conversation ? providerLabels[conversation.provider] : '', [conversation]);
 

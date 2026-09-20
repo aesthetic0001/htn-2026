@@ -104,6 +104,8 @@ export function createApp(providerInput: EventProvider | readonly EventProvider[
     response.setHeader("Content-Type", "text/event-stream");
     response.setHeader("Cache-Control", "no-cache, no-transform");
     response.setHeader("Connection", "keep-alive");
+    response.setHeader("X-Accel-Buffering", "no");
+    response.socket?.setNoDelay(true);
     response.flushHeaders();
 
     const writeEvent = (event: ProvidenceEvent) => {

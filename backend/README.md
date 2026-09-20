@@ -53,3 +53,5 @@ The public conversation/message model is the common subset supported by both pro
 - `GET /api/events` for server-sent `provider.status`, `conversation.updated`, and `message.created` events
 
 Conversation and message IDs are provider-qualified (for example, `discord:123` or `instagram:abc`). URL-encode IDs when placing them in route parameters. Conversation routes dispatch to the provider named by the ID prefix; unavailable providers do not prevent connected providers from being listed.
+
+The frontend treats `/api/events` as an invalidation stream: it fetches a full HTTP snapshot when the stream connects or reconnects, then refreshes affected data immediately for subsequent events. A slow polling fallback remains enabled for recovery.

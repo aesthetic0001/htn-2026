@@ -153,6 +153,39 @@ test("connects the requested provider and rejects unknown ID prefixes", async ()
   assert.equal((await unknown.json() as { error: { code: string } }).error.code, "INVALID_PROVIDER_ID");
 });
 
+test("streams provider events over SSE without response buffering", async () => {
+  const controller = new AbortController();
+  const response = await fetch(`${baseUrl}/api/events`, { signal: controller.signal });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/event-stream");
+  assert.equal(response.headers.get("x-accel-buffering"), "no");
+  assert(response.body);
+
+  discordProvider.emit("event", {
+    type: "conversation.updated",
+    provider: "discord",
+    occurredAt: "2026-09-20T12:00:00.000Z",
+    data: { ...conversation, unread: true },
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let streamed = "";
+  try {
+    while (!streamed.includes("event: conversation.updated")) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      streamed += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    await reader.cancel();
+    controller.abort();
+  }
+
+  assert.match(streamed, /event: ready/);
+  assert.match(streamed, /event: conversation\.updated/);
+});
+
 test("starts in a degraded setup state when no providers are configured", async () => {
   const emptyServer = createServer(createApp([]));
   await new Promise<void>((resolve) => emptyServer.listen(0, "127.0.0.1", resolve));

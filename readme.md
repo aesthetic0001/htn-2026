@@ -40,6 +40,7 @@ when users want to perform actions like sending messages, replying to messages, 
 
 frontend with expo, backend with express.
 scraping done with playwright + custom built chromium to prevent automation detection.
+foreground updates are streamed from the backend with server-sent events (SSE); commands use HTTP and a slow polling fallback repairs missed state.
 
 ## roadmap
 

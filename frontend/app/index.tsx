@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Avatar } from '@/components/Avatar';
 import { providerColors, providerLabels } from '@/data/messages';
 import { connectProvider, errorMessage, getConversations, getProviders } from '@/services/api';
+import { subscribeToRealtimeEvents } from '@/services/realtime';
 import type { Conversation, ProviderName, ProviderStatus } from '@/types/messaging';
 
 const INK = '#242320';
@@ -25,7 +26,7 @@ const PAPER = '#F6F3EC';
 const ACCENT = '#B44D32';
 const DISCORD_NOTIFICATION = '#DA373C';
 const INSTAGRAM_NOTIFICATION = '#0095F6';
-const POLL_INTERVAL_MS = 15_000;
+const FALLBACK_POLL_INTERVAL_MS = 60_000;
 
 function ConversationNotificationIndicator({ conversation }: { conversation: Conversation }) {
   if (!conversation.unread) return null;
@@ -112,22 +113,31 @@ export default function InboxScreen() {
   const [connecting, setConnecting] = useState<ProviderName>();
   const [loadError, setLoadError] = useState<string>();
   const requestInFlight = useRef(false);
+  const refreshQueued = useRef(false);
   const mounted = useRef(true);
   const { width } = useWindowDimensions();
 
   const loadData = useCallback(async (showRefresh = false) => {
-    if (requestInFlight.current) return;
+    if (requestInFlight.current) {
+      refreshQueued.current = true;
+      return;
+    }
     requestInFlight.current = true;
     if (showRefresh) setRefreshing(true);
 
     try {
-      const [nextProviders, nextConversations] = await Promise.all([getProviders(), getConversations()]);
-      if (!mounted.current) return;
-      setProviders(nextProviders);
-      setConversations(nextConversations);
-      setLoadError(undefined);
-    } catch (error) {
-      if (mounted.current) setLoadError(errorMessage(error));
+      do {
+        refreshQueued.current = false;
+        try {
+          const [nextProviders, nextConversations] = await Promise.all([getProviders(), getConversations()]);
+          if (!mounted.current) return;
+          setProviders(nextProviders);
+          setConversations(nextConversations);
+          setLoadError(undefined);
+        } catch (error) {
+          if (mounted.current) setLoadError(errorMessage(error));
+        }
+      } while (mounted.current && refreshQueued.current);
     } finally {
       requestInFlight.current = false;
       if (mounted.current) {
@@ -140,11 +150,13 @@ export default function InboxScreen() {
   useFocusEffect(useCallback(() => {
     mounted.current = true;
     const initialLoad = setTimeout(() => void loadData(), 0);
-    const poller = setInterval(() => void loadData(), POLL_INTERVAL_MS);
+    const unsubscribe = subscribeToRealtimeEvents(() => void loadData());
+    const poller = setInterval(() => void loadData(), FALLBACK_POLL_INTERVAL_MS);
     return () => {
       mounted.current = false;
       clearTimeout(initialLoad);
       clearInterval(poller);
+      unsubscribe();
     };
   }, [loadData]));
 
