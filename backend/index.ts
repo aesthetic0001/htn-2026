@@ -1,17 +1,33 @@
-import {chromium} from 'playwright'
-import dotenv from 'dotenv'
+import { createServer } from "node:http";
+import { createApp } from "./src/app.js";
+import { config } from "./src/config.js";
+import { DiscordProvider } from "./src/discord-provider.js";
 
-dotenv.config({quiet: true})
+const discord = new DiscordProvider({
+  email: config.discordEmail,
+  password: config.discordPassword,
+  userDataDir: config.userDataDir,
+  executablePath: config.customChromiumPath,
+  headless: config.headless,
+  pollIntervalMs: config.pollIntervalMs,
+});
 
-// currently only for one user: will scale to multiple later
-const CUSTOM_CHROMIUM_PATH = process.env.CUSTOM_CHROMIUM_PATH
-const USER_DATA_DIR = process.env.USER_DATA_DIR!!
+const server = createServer(createApp(discord, config.frontendOrigin));
+server.listen(config.port, config.host, () => {
+  console.log(`Providence backend listening at http://${config.host}:${config.port}`);
+  void discord.connect().catch((error: unknown) => {
+    console.error("Discord failed to connect:", error);
+  });
+});
 
-const config = {}
-
-if (CUSTOM_CHROMIUM_PATH) {
-    config.executablePath = CUSTOM_CHROMIUM_PATH
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received; shutting down`);
+  server.close();
+  await discord.disconnect().catch((error: unknown) => console.error("Discord shutdown failed:", error));
 }
 
-const context = await chromium.launchPersistentContext(USER_DATA_DIR, config);
-
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
