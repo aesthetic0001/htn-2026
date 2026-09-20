@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import type { BrowserContext, Page } from "playwright-core";
+import type { BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { AsyncLock } from "./async-lock.js";
 import {
@@ -49,6 +49,7 @@ interface InstagramThreadRow extends Omit<RawInstagramConversation, "threadId" |
 }
 
 interface MessageDomReference {
+  conversationId: string;
   selector: string;
   index: number;
 }
@@ -188,6 +189,83 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
       }
       this.emitEvent("message.created", sent);
       return sent;
+    });
+  }
+
+  async deleteMessage(conversationId: string, messageId: string): Promise<void> {
+    await this.lock.run(async () => {
+      this.parseMessageId(messageId);
+      const page = this.connectedPage();
+      await this.openConversation(page, conversationId);
+      // Refresh positional DOM references before a destructive action. Instagram
+      // frequently recycles message rows as the thread changes.
+      await this.scrapeVisibleMessages(page, conversationId, 100);
+      const reference = this.messageDomReferences.get(messageId);
+      if (!reference) {
+        throw new AppError("Message is not currently visible in Instagram", 404, "MESSAGE_NOT_FOUND");
+      }
+
+      const message = page.locator(reference.selector).nth(reference.index);
+      if (!(await message.isVisible().catch(() => false))) {
+        throw new AppError("Message is not currently visible in Instagram", 404, "MESSAGE_NOT_FOUND");
+      }
+      const messageHandle = await message.elementHandle();
+      await message.hover();
+      // Instagram renders this as either a native button or a focusable div.
+      // Its stable contract is the accessible label shown in the DOM, so use
+      // the sole visible matching action directly. Fall back to proximity only
+      // if Instagram exposes several matching actions at the same time.
+      const visibleMoreActions = page.locator([
+        'button[aria-label^="See more options for message from " i]',
+        '[role="button"][aria-label^="See more options for message from " i]',
+      ].join(", ")).filter({ visible: true });
+      const moreButton = await visibleMoreActions.count() === 1
+        ? visibleMoreActions.first()
+        : await nearestVisibleLocator(message, visibleMoreActions);
+      if (!moreButton) {
+        throw new AppError("Instagram's More action is unavailable", 502, "MESSAGE_DELETE_FAILED");
+      }
+      // Instagram places a pointer-intercepting overlay over this visible control.
+      // It is keyboard-focusable and Enter reliably opens its native menu.
+      await moreButton.press("Enter");
+      const visibleUnsendText = page.getByText("Unsend", { exact: true })
+        .filter({ visible: true })
+        .last();
+      await visibleUnsendText.waitFor({ state: "visible", timeout: 3_000 }).catch(() => undefined);
+
+      const unsendAction = await firstVisibleLocator(
+        page.getByRole("menuitem", { name: /^unsend$/i }).last(),
+        page.getByRole("button", { name: /^unsend$/i }).last(),
+        visibleUnsendText,
+      );
+      if (!unsendAction) {
+        throw new AppError(
+          "Instagram only offers unsend for your own visible messages",
+          403,
+          "MESSAGE_DELETE_UNAVAILABLE",
+        );
+      }
+      await unsendAction.click();
+
+      const confirmation = page.getByRole("dialog")
+        .filter({ hasText: /unsend message|removed from the chat|already have been seen/i })
+        .last();
+      await confirmation.waitFor({ state: "visible", timeout: 750 }).catch(() => undefined);
+      if (await confirmation.isVisible().catch(() => false)) {
+        const confirmUnsend = confirmation.getByRole("button", { name: /^unsend$/i }).last();
+        if (await confirmUnsend.isVisible().catch(() => false)) await confirmUnsend.click();
+      }
+
+      if (messageHandle) {
+        await page.waitForFunction((element) => !element.isConnected, messageHandle, { timeout: 5_000 })
+          .catch(() => undefined);
+        const stillConnected = await messageHandle.evaluate((element) => element.isConnected).catch(() => false);
+        if (stillConnected) {
+          throw new AppError("Instagram did not unsend the message", 502, "MESSAGE_DELETE_FAILED");
+        }
+      }
+      this.messageDomReferences.delete(messageId);
+      this.emitEvent("message.deleted", { conversationId, messageId });
     });
   }
 
@@ -524,6 +602,10 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     const duplicateOrdinals = new Map<string, number>();
     const messages: Message[] = [];
 
+    for (const [id, reference] of this.messageDomReferences) {
+      if (reference.conversationId === conversationId) this.messageDomReferences.delete(id);
+    }
+
     for (const raw of rawMessages) {
       const sentAt = normalizeInstagramTimestamp(raw.timestamp);
       const fingerprint = JSON.stringify([
@@ -537,7 +619,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
       const stableSource = raw.providerId || `${fingerprint}:${ordinal}`;
       const providerMessageId = createHash("sha256").update(stableSource).digest("hex").slice(0, 24);
       const id = this.messageId(providerMessageId);
-      this.messageDomReferences.set(id, { selector: raw.selector, index: raw.index });
+      this.messageDomReferences.set(id, { conversationId, selector: raw.selector, index: raw.index });
       messages.push({
         id,
         provider: "instagram",
@@ -833,6 +915,34 @@ export function instagramThreadRowProviderId(
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function firstVisibleLocator(...locators: Locator[]): Promise<Locator | undefined> {
+  for (const locator of locators) {
+    if (await locator.isVisible().catch(() => false)) return locator;
+  }
+  return undefined;
+}
+
+async function nearestVisibleLocator(
+  target: Locator,
+  candidates: Locator,
+): Promise<Locator | undefined> {
+  const targetBox = await target.boundingBox();
+  if (!targetBox) return undefined;
+
+  let nearest: { locator: Locator; distance: number } | undefined;
+  for (let index = 0; index < await candidates.count(); index += 1) {
+    const candidate = candidates.nth(index);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+    const box = await candidate.boundingBox();
+    if (!box) continue;
+    const horizontal = box.x + box.width / 2 - (targetBox.x + targetBox.width / 2);
+    const vertical = box.y + box.height / 2 - (targetBox.y + targetBox.height / 2);
+    const distance = Math.hypot(horizontal, vertical);
+    if (!nearest || distance < nearest.distance) nearest = { locator: candidate, distance };
+  }
+  return nearest?.locator;
 }
 
 export function normalizeInstagramTimestamp(

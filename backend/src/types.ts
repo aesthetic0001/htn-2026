@@ -82,11 +82,12 @@ export interface MessageProvider {
   listConversations(): Promise<Conversation[]>;
   listMessages(conversationId: string, limit: number, acknowledge?: boolean): Promise<Message[]>;
   sendMessage(conversationId: string, input: SendMessageInput): Promise<Message>;
+  deleteMessage(conversationId: string, messageId: string): Promise<void>;
   addReaction(conversationId: string, messageId: string, emoji: string): Promise<void>;
 }
 
 export interface ProvidenceEvent {
-  type: "provider.status" | "conversation.updated" | "message.created";
+  type: "provider.status" | "conversation.updated" | "message.created" | "message.deleted";
   provider: ProviderName;
   occurredAt: string;
   data: unknown;

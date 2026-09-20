@@ -52,6 +52,7 @@ class FakeProvider extends EventEmitter implements MessageProvider {
   sent?: SendMessageInput;
   sentConversationId?: string;
   reactionConversationId?: string;
+  deletedMessage?: { conversationId: string; messageId: string };
   connectCalls = 0;
   messageAcknowledgements: boolean[] = [];
   constructor(
@@ -72,6 +73,9 @@ class FakeProvider extends EventEmitter implements MessageProvider {
     this.sentConversationId = id;
     const message = Array.isArray(this.message) ? this.message[0]! : this.message;
     return { ...message, conversationId: id, content: input.content };
+  }
+  async deleteMessage(conversationId: string, messageId: string) {
+    this.deletedMessage = { conversationId, messageId };
   }
   async addReaction(conversationId: string) { this.reactionConversationId = conversationId; }
 }
@@ -123,7 +127,7 @@ test("lists normalized conversations and messages", async () => {
   assert.deepEqual(discordProvider.messageAcknowledgements.slice(-2), [false, true]);
 });
 
-test("validates and sends messages", async () => {
+test("validates, sends, and deletes messages", async () => {
   const invalid = await fetch(`${baseUrl}/api/conversations/discord%3A123/messages`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -146,6 +150,16 @@ test("validates and sends messages", async () => {
   });
   assert.equal(instagramSent.status, 201);
   assert.deepEqual(instagramProvider.sent, { content: "instagram message" });
+
+  const deleted = await fetch(
+    `${baseUrl}/api/conversations/discord%3A123/messages/discord%3A456`,
+    { method: "DELETE" },
+  );
+  assert.equal(deleted.status, 204);
+  assert.deepEqual(discordProvider.deletedMessage, {
+    conversationId: "discord:123",
+    messageId: "discord:456",
+  });
 });
 
 test("manually merges direct messages and routes sends by frequency or override", async () => {
@@ -259,6 +273,16 @@ test("manually merges direct messages and routes sends by frequency or override"
     );
     assert.equal(reacted.status, 204);
     assert.equal(instagramSource.reactionConversationId, instagramConversation.id);
+
+    const deleted = await fetch(
+      `${mergeBaseUrl}/api/conversations/${encodeURIComponent(profile.id)}/messages/instagram%3Adef`,
+      { method: "DELETE" },
+    );
+    assert.equal(deleted.status, 204);
+    assert.deepEqual(instagramSource.deletedMessage, {
+      conversationId: instagramConversation.id,
+      messageId: "instagram:def",
+    });
 
     const removed = await fetch(`${mergeBaseUrl}/api/profile-merges/${encodeURIComponent(profile.id)}`, {
       method: "DELETE",

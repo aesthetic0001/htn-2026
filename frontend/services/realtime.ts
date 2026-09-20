@@ -3,7 +3,7 @@ import { fetch } from 'expo/fetch';
 import { apiUrl } from '@/services/api';
 import type { ProviderName } from '@/types/messaging';
 
-export type RealtimeEventType = 'ready' | 'provider.status' | 'conversation.updated' | 'message.created';
+export type RealtimeEventType = 'ready' | 'provider.status' | 'conversation.updated' | 'message.created' | 'message.deleted';
 
 export interface RealtimeEvent {
   type: RealtimeEventType;
@@ -114,5 +114,6 @@ function isRealtimeEventType(value: string): value is RealtimeEventType {
   return value === 'ready'
     || value === 'provider.status'
     || value === 'conversation.updated'
-    || value === 'message.created';
+    || value === 'message.created'
+    || value === 'message.deleted';
 }

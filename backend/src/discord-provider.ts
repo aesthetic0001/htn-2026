@@ -149,6 +149,58 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
     });
   }
 
+  async deleteMessage(conversationId: string, messageId: string): Promise<void> {
+    await this.lock.run(async () => {
+      const page = this.connectedPage();
+      await this.openConversation(page, conversationId);
+      const providerMessageId = this.parseMessageId(messageId);
+      const message = page.locator(
+        `[id$="-${providerMessageId}"], [data-list-item-id$="-${providerMessageId}"]`,
+      ).first();
+      if (!(await message.isVisible().catch(() => false))) {
+        throw new AppError("Message is not currently visible in Discord", 404, "MESSAGE_NOT_FOUND");
+      }
+
+      await page.keyboard.down("Shift");
+      try {
+        await message.hover();
+        const scopedDelete = message.locator([
+          'button[aria-label*="delete" i]',
+          '[role="button"][aria-label*="delete" i]',
+          'button[title*="delete" i]',
+          '[role="button"][title*="delete" i]',
+        ].join(", ")).last();
+        const deleteButton = await firstVisibleLocator(
+          scopedDelete,
+          page.getByRole("button", { name: /delete(?: message)?/i }).last(),
+        );
+        if (!deleteButton) {
+          throw new AppError(
+            "Discord only offers deletion for your own visible messages",
+            403,
+            "MESSAGE_DELETE_UNAVAILABLE",
+          );
+        }
+        await deleteButton.click();
+      } finally {
+        await page.keyboard.up("Shift");
+      }
+
+      const dialog = page.getByRole("dialog").filter({ hasText: /delete message/i }).last();
+      await dialog.waitFor({ state: "visible", timeout: 750 }).catch(() => undefined);
+      if (await dialog.isVisible().catch(() => false)) {
+        const confirmDelete = dialog.getByRole("button", { name: /^delete$/i }).last();
+        if (await confirmDelete.isVisible().catch(() => false)) await confirmDelete.click();
+      }
+
+      await message.waitFor({ state: "detached", timeout: 5_000 }).catch(() => undefined);
+      if (await message.isVisible().catch(() => false)) {
+        throw new AppError("Discord did not remove the message", 502, "MESSAGE_DELETE_FAILED");
+      }
+      this.emitEvent("message.deleted", { conversationId, messageId });
+    });
+  }
+
   async addReaction(conversationId: string, messageId: string, emoji: string): Promise<void> {
     await this.lock.run(async () => {
       const page = this.connectedPage();
@@ -535,4 +587,11 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function firstVisibleLocator(...locators: Locator[]): Promise<Locator | undefined> {
+  for (const locator of locators) {
+    if (await locator.isVisible().catch(() => false)) return locator;
+  }
+  return undefined;
 }

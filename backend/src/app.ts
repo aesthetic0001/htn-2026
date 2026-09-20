@@ -172,6 +172,21 @@ export function createApp(
     }),
   );
 
+  app.delete(
+    "/api/conversations/:conversationId/messages/:messageId",
+    asyncRoute(async (request, response) => {
+      const conversationId = requiredParam(request.params.conversationId, "conversationId");
+      const messageId = requiredParam(request.params.messageId, "messageId");
+      const profile = profileMerges.get(conversationId);
+      const targetId = profile
+        ? await conversationForMergedMessage(profile, messageId, providerByName)
+        : conversationId;
+      const provider = providerForQualifiedId(providerByName, targetId);
+      await provider.deleteMessage(targetId, messageId);
+      response.status(204).end();
+    }),
+  );
+
   app.get("/api/events", (request, response) => {
     response.status(200);
     response.setHeader("Content-Type", "text/event-stream");

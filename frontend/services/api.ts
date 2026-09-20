@@ -138,6 +138,13 @@ export async function sendMessage(
   return body.message;
 }
 
+export function deleteMessage(conversationId: string, messageId: string) {
+  return request<void>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+    { method: 'DELETE' },
+  );
+}
+
 export function addReaction(conversationId: string, messageId: string, emoji: string) {
   return request<void>(
     `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/reactions`,

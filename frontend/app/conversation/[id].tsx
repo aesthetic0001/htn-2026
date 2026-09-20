@@ -22,6 +22,7 @@ import { Avatar } from '@/components/Avatar';
 import { currentUser, providerColors, providerLabels } from '@/data/messages';
 import {
   addReaction,
+  deleteMessage,
   deleteProfileMerge,
   errorMessage,
   getConversations,
@@ -52,11 +53,15 @@ function messageTime(value: string) {
 }
 
 function MessageItem({
+  deleting,
   message,
+  onDelete,
   onReact,
   showProvider,
 }: {
+  deleting: boolean;
   message: Message;
+  onDelete: (message: Message) => void;
   onReact: (messageId: string, emoji: string) => void;
   showProvider: boolean;
 }) {
@@ -88,8 +93,25 @@ function MessageItem({
             </Pressable>
           ))}
 
-          {metadata ? (
-            <Text style={[styles.messageTime, mine && styles.messageTimeMine]}>{metadata}</Text>
+          {metadata || mine ? (
+            <View style={styles.bubbleFooter}>
+              {metadata ? (
+                <Text style={[styles.messageTime, mine && styles.messageTimeMine]}>{metadata}</Text>
+              ) : null}
+              {mine ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Delete message"
+                  disabled={deleting}
+                  hitSlop={7}
+                  onPress={() => onDelete(message)}
+                  style={({ pressed }) => [styles.deleteButton, pressed && styles.deleteButtonPressed]}>
+                  {deleting
+                    ? <ActivityIndicator color="#E8C5BB" size="small" />
+                    : <SymbolView name={{ ios: 'trash', android: 'delete', web: 'delete' }} size={14} tintColor="#E8C5BB" />}
+                </Pressable>
+              ) : null}
+            </View>
           ) : null}
         </View>
 
@@ -120,6 +142,7 @@ export default function ConversationScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
+  const [deletingMessageIds, setDeletingMessageIds] = useState<ReadonlySet<string>>(new Set());
   const [updatingRoute, setUpdatingRoute] = useState(false);
   const [updatingMute, setUpdatingMute] = useState(false);
   const [showRouteSettings, setShowRouteSettings] = useState(false);
@@ -274,6 +297,46 @@ export default function ConversationScreen() {
     }
   }, [conversationId, refreshThread, thread]);
 
+  const performDelete = useCallback(async (message: Message) => {
+    if (!conversationId || deletingMessageIds.has(message.id)) return;
+    setDeletingMessageIds((current) => new Set(current).add(message.id));
+    setLoadError(undefined);
+    try {
+      await deleteMessage(conversationId, message.id);
+      setThread((current) => current.filter(({ id }) => id !== message.id));
+    } catch (error) {
+      setLoadError(errorMessage(error));
+    } finally {
+      if (mounted.current) {
+        setDeletingMessageIds((current) => {
+          const next = new Set(current);
+          next.delete(message.id);
+          return next;
+        });
+      }
+    }
+  }, [conversationId, deletingMessageIds]);
+
+  const confirmDelete = useCallback((message: Message) => {
+    const detail = `This will unsend it from ${providerLabels[message.provider]} for everyone.`;
+    if (Platform.OS === 'web') {
+      if (globalThis.confirm(`Delete this message?\n\n${detail}`)) void performDelete(message);
+      return;
+    }
+    Alert.alert(
+      'Delete this message?',
+      detail,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => void performDelete(message),
+        },
+      ],
+    );
+  }, [performDelete]);
+
   const updateSendRoute = useCallback(async (sendConversationId: string | null) => {
     if (!conversation || conversation.provider !== 'merged' || updatingRoute) return;
     setUpdatingRoute(true);
@@ -308,6 +371,15 @@ export default function ConversationScreen() {
 
   const confirmUnmerge = useCallback(() => {
     if (!conversation || conversation.provider !== 'merged') return;
+    const performUnmerge = () => void deleteProfileMerge(conversation.id)
+      .then(() => router.replace('/'))
+      .catch((error) => setLoadError(errorMessage(error)));
+    if (Platform.OS === 'web') {
+      if (globalThis.confirm('Unmerge this profile?\n\nThe original direct messages will reappear separately. No messages will be deleted.')) {
+        performUnmerge();
+      }
+      return;
+    }
     Alert.alert(
       'Unmerge this profile?',
       'The original direct messages will reappear separately. No messages will be deleted.',
@@ -316,9 +388,7 @@ export default function ConversationScreen() {
         {
           text: 'Unmerge',
           style: 'destructive',
-          onPress: () => void deleteProfileMerge(conversation.id)
-            .then(() => router.replace('/'))
-            .catch((error) => setLoadError(errorMessage(error))),
+          onPress: performUnmerge,
         },
       ],
     );
@@ -397,7 +467,15 @@ export default function ConversationScreen() {
             keyExtractor={(item) => item.id}
             keyboardShouldPersistTaps="handled"
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refreshThread(true)} tintColor={ACCENT} />}
-            renderItem={({ item }) => <MessageItem message={item} onReact={handleReaction} showProvider={conversation.provider === 'merged'} />}
+            renderItem={({ item }) => (
+              <MessageItem
+                deleting={deletingMessageIds.has(item.id)}
+                message={item}
+                onDelete={confirmDelete}
+                onReact={handleReaction}
+                showProvider={conversation.provider === 'merged'}
+              />
+            )}
             showsVerticalScrollIndicator={false}
             ListHeaderComponent={thread.length ? <View style={styles.dayMarker}><View style={styles.dayRule} /><Text style={styles.dayText}>Recent</Text><View style={styles.dayRule} /></View> : null}
             ListEmptyComponent={<View style={styles.emptyThread}><Text style={styles.emptyThreadTitle}>Start the conversation</Text><Text style={styles.emptyThreadBody}>Messages sent here will go through {sendRouteLabel}.</Text></View>}
@@ -506,8 +584,11 @@ const styles = StyleSheet.create({
   bubbleMine: { backgroundColor: '#A64730', borderBottomRightRadius: 5 },
   messageText: { color: INK, fontSize: 15, lineHeight: 21 },
   messageTextMine: { color: '#FFF9F2' },
-  messageTime: { alignSelf: 'flex-end', color: '#817C74', fontSize: 10, marginTop: 6 },
+  bubbleFooter: { minHeight: 18, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'flex-end', gap: 7, marginTop: 5 },
+  messageTime: { color: '#817C74', fontSize: 10 },
   messageTimeMine: { color: '#E8C5BB' },
+  deleteButton: { width: 22, height: 20, alignItems: 'center', justifyContent: 'center', borderRadius: 7 },
+  deleteButtonPressed: { backgroundColor: 'rgba(255,255,255,0.14)' },
   attachment: { minWidth: 220, flexDirection: 'row', alignItems: 'center', marginTop: 11, padding: 10, borderRadius: 11, backgroundColor: '#F6F1E8' },
   attachmentMine: { backgroundColor: 'rgba(255,255,255,0.12)' },
   attachmentText: { flex: 1, minWidth: 0, marginLeft: 9 },
