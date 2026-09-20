@@ -26,6 +26,20 @@ interface DiscoveredConversation extends Conversation {
   path: string;
 }
 
+interface RawInstagramConversation {
+  threadId: string;
+  path: string;
+  text: string;
+  label: string;
+  imageAlts: string[];
+  avatarUrl?: string;
+  unread: boolean;
+}
+
+interface InstagramThreadRow extends Omit<RawInstagramConversation, "threadId" | "path"> {
+  index: number;
+}
+
 interface MessageDomReference {
   selector: string;
   index: number;
@@ -46,6 +60,22 @@ interface RawInstagramMessage {
 
 const INSTAGRAM_ORIGIN = "https://www.instagram.com";
 const THREAD_LINK_SELECTOR = 'a[href^="/direct/t/"]';
+const THREAD_ROW_SELECTOR = '[role="button"][tabindex="0"]';
+const LOGIN_IDENTIFIER_SELECTOR = [
+  'input[name="username"]',
+  'input[name="email"]',
+  'input[autocomplete="username"]',
+].join(", ");
+const LOGIN_PASSWORD_SELECTOR = [
+  'input[name="password"]',
+  'input[name="pass"]',
+  'input[autocomplete="current-password"]',
+].join(", ");
+const LOGIN_SUBMIT_SELECTOR = [
+  '[role="button"][aria-label="Log In" i]',
+  'button[type="submit"]',
+  'input[type="submit"]',
+].map((selector) => `${selector}:visible`).join(", ");
 const ID_MESSAGE_SELECTOR = "main [data-message-id]";
 const ROW_MESSAGE_SELECTOR = 'main [role="row"]';
 const TEXT_MESSAGE_SELECTOR = 'main div[dir="auto"]';
@@ -197,25 +227,25 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     await page.goto(`${INSTAGRAM_ORIGIN}/direct/inbox/`, { waitUntil: "domcontentloaded" });
     await this.dismissCookiePrompt(page);
 
-    const username = page.locator('input[name="username"]');
-    await username.or(page.locator(THREAD_LINK_SELECTOR)).first()
-      .waitFor({ state: "visible", timeout: 60_000 })
-      .catch(() => undefined);
+    const loginIdentifier = page.locator(LOGIN_IDENTIFIER_SELECTOR).first();
+    if (!new URL(page.url()).pathname.startsWith("/direct/")) {
+      await loginIdentifier.or(page.locator(THREAD_LINK_SELECTOR)).first()
+        .waitFor({ state: "visible", timeout: 60_000 })
+        .catch(() => undefined);
+    }
 
-    if (await username.isVisible().catch(() => false)) {
-      await username.fill(this.options.email);
-      await page.locator('input[name="password"]').fill(this.options.password);
-      await page.locator('button[type="submit"]').click();
-      try {
-        await page.waitForURL(/instagram\.com\/(?:direct|accounts\/onetap)/, { timeout: 120_000 });
-      } catch {
-        const verificationVisible = await page.getByText(
-          /security code|two-factor|suspicious login|confirm it'?s you|challenge/i,
-        ).first().isVisible().catch(() => false);
+    if (await loginIdentifier.isVisible().catch(() => false)) {
+      await loginIdentifier.fill(this.options.email);
+      await page.locator(LOGIN_PASSWORD_SELECTOR).first().fill(this.options.password);
+      await page.locator(LOGIN_SUBMIT_SELECTOR).first().click();
+      const loginOutcome = await waitForInstagramLoginOutcome(page, 120_000);
+      if (loginOutcome !== "authenticated") {
         throw new AppError(
-          verificationVisible
+          loginOutcome === "verification"
             ? "Instagram requires interactive verification. Complete it in the opened browser, then reconnect."
-            : "Instagram login did not complete. Check the credentials and the opened browser.",
+            : loginOutcome === "invalid-credentials"
+              ? "Instagram rejected INSTAGRAM_EMAIL or INSTAGRAM_PASSWORD. Update the backend credentials and reconnect."
+              : "Instagram login did not complete. Check the credentials and the opened browser.",
           503,
           "INSTAGRAM_LOGIN_FAILED",
         );
@@ -250,9 +280,10 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     if (new URL(page.url()).pathname !== "/direct/inbox/") {
       await page.goto(`${INSTAGRAM_ORIGIN}/direct/inbox/`, { waitUntil: "domcontentloaded" });
     }
-    await page.locator(THREAD_LINK_SELECTOR).first().waitFor({ state: "visible", timeout: 20_000 }).catch(() => undefined);
+    await page.locator(`${THREAD_LINK_SELECTOR}, ${THREAD_ROW_SELECTOR}`).first()
+      .waitFor({ state: "visible", timeout: 20_000 }).catch(() => undefined);
 
-    const links = await page.locator(THREAD_LINK_SELECTOR).evaluateAll((anchors) =>
+    const links: RawInstagramConversation[] = await page.locator(THREAD_LINK_SELECTOR).evaluateAll((anchors) =>
       anchors.flatMap((node) => {
         const anchor = node as HTMLAnchorElement;
         const path = new URL(anchor.href).pathname;
@@ -275,6 +306,22 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
       }),
     );
 
+    if (links.length === 0) {
+      const rows = await this.findThreadRows(page);
+      for (const row of rows) {
+        const previousPath = new URL(page.url()).pathname;
+        const rowLocator = page.locator(THREAD_ROW_SELECTOR).nth(row.index);
+        await rowLocator.scrollIntoViewIfNeeded();
+        await rowLocator.click();
+        await page.waitForURL((url) =>
+          url.pathname !== previousPath && /^\/direct\/t\/[^/?#]+\/?$/.test(url.pathname),
+        { timeout: 20_000 });
+        const path = new URL(page.url()).pathname;
+        const match = path.match(/^\/direct\/t\/([^/?#]+)\/?$/);
+        if (match?.[1]) links.push({ ...row, threadId: match[1], path });
+      }
+    }
+
     this.conversations.clear();
     for (const link of links) {
       const id = this.conversationId(link.threadId);
@@ -290,6 +337,30 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
         path: link.path,
       });
     }
+  }
+
+  private async findThreadRows(page: Page): Promise<InstagramThreadRow[]> {
+    return page.locator(THREAD_ROW_SELECTOR).evaluateAll((buttons) =>
+      buttons.flatMap((node, index) => {
+        const button = node as HTMLElement;
+        const rect = button.getBoundingClientRect();
+        const images = [...button.querySelectorAll("img")];
+        const text = button.innerText || button.textContent || "";
+        // The current inbox uses wide button rows instead of links. Exclude compact
+        // controls such as the account menu, compose button, and Notes carousel.
+        if (rect.width < 250 || rect.height < 48 || images.length === 0 || !text.trim()) return [];
+        const label = button.getAttribute("aria-label") || "";
+        return [{
+          index,
+          text,
+          label,
+          imageAlts: images.map((image) => image.getAttribute("alt") || "").filter(Boolean),
+          ...(images[0]?.src ? { avatarUrl: images[0].src } : {}),
+          unread: /\bunread\b/i.test(label)
+            || Boolean(button.querySelector('svg[aria-label*="unread" i], [aria-label*="new message" i]')),
+        }];
+      }),
+    );
   }
 
   private async readMessages(page: Page, conversationId: string, limit: number): Promise<Message[]> {
@@ -419,6 +490,35 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
       data,
     } satisfies ProvidenceEvent);
   }
+}
+
+type InstagramLoginOutcome = "authenticated" | "invalid-credentials" | "verification" | "pending";
+
+async function waitForInstagramLoginOutcome(page: Page, timeoutMs: number): Promise<InstagramLoginOutcome> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const visibleText = await page.locator("body").innerText().catch(() => "");
+    const outcome = classifyInstagramLoginState(new URL(page.url()).pathname, visibleText);
+    if (outcome !== "pending") return outcome;
+    await page.waitForTimeout(250);
+  }
+  return "pending";
+}
+
+export function classifyInstagramLoginState(pathname: string, visibleText: string): InstagramLoginOutcome {
+  if (pathname.startsWith("/direct/") || pathname.startsWith("/accounts/onetap")) {
+    return "authenticated";
+  }
+  if (/security code|two-factor|suspicious login|confirm it'?s you|challenge/i.test(visibleText)) {
+    return "verification";
+  }
+  if (
+    /login information you entered is incorrect|incorrect password|password you entered is incorrect|couldn'?t log in/i
+      .test(visibleText)
+  ) {
+    return "invalid-credentials";
+  }
+  return "pending";
 }
 
 async function extractVisibleInstagramMessages(page: Page, conversationTitle: string): Promise<RawInstagramMessage[]> {

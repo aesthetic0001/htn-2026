@@ -1,6 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeInstagramConversationTitle } from "../src/instagram-provider.js";
+import {
+  classifyInstagramLoginState,
+  normalizeInstagramConversationTitle,
+} from "../src/instagram-provider.js";
+
+test("recognizes current Instagram login outcomes", () => {
+  assert.equal(classifyInstagramLoginState("/direct/inbox/", ""), "authenticated");
+  assert.equal(classifyInstagramLoginState("/accounts/onetap/", "Save your login info?"), "authenticated");
+  assert.equal(
+    classifyInstagramLoginState(
+      "/accounts/login/",
+      "The login information you entered is incorrect. Find your account and log in.",
+    ),
+    "invalid-credentials",
+  );
+  assert.equal(classifyInstagramLoginState("/challenge/", "Enter your security code"), "verification");
+  assert.equal(classifyInstagramLoginState("/accounts/login/", "Log into Instagram"), "pending");
+});
 
 test("extracts an Instagram conversation title from the visible thread row", () => {
   assert.equal(

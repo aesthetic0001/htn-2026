@@ -8,15 +8,15 @@ const providers: Array<DiscordProvider | InstagramProvider> = [];
 const discordCredentials = configuredCredentials("Discord", config.discordEmail, config.discordPassword);
 const instagramCredentials = configuredCredentials("Instagram", config.instagramEmail, config.instagramPassword);
 
-// if (discordCredentials) {
-//   providers.push(new DiscordProvider({
-//     ...discordCredentials,
-//     userDataDir: config.discordUserDataDir,
-//     executablePath: config.customChromiumPath,
-//     headless: config.headless,
-//     pollIntervalMs: config.pollIntervalMs,
-//   }));
-// }
+if (discordCredentials) {
+  providers.push(new DiscordProvider({
+    ...discordCredentials,
+    userDataDir: config.discordUserDataDir,
+    executablePath: config.customChromiumPath,
+    headless: config.headless,
+    pollIntervalMs: config.pollIntervalMs,
+  }));
+}
 
 if (instagramCredentials) {
   providers.push(new InstagramProvider({
