@@ -142,3 +142,21 @@ test("connects the requested provider and rejects unknown ID prefixes", async ()
   assert.equal(unknown.status, 400);
   assert.equal((await unknown.json() as { error: { code: string } }).error.code, "INVALID_PROVIDER_ID");
 });
+
+test("starts in a degraded setup state when no providers are configured", async () => {
+  const emptyServer = createServer(createApp([]));
+  await new Promise<void>((resolve) => emptyServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = emptyServer.address();
+    assert(address && typeof address !== "string");
+    const emptyBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    const health = await fetch(`${emptyBaseUrl}/health`);
+    assert.deepEqual(await health.json(), { status: "degraded", providers: [] });
+
+    const listed = await fetch(`${emptyBaseUrl}/api/conversations`);
+    assert.deepEqual(await listed.json(), { conversations: [] });
+  } finally {
+    await new Promise<void>((resolve, reject) => emptyServer.close((error) => error ? reject(error) : resolve()));
+  }
+});

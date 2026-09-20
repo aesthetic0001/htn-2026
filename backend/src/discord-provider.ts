@@ -115,7 +115,8 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
 
       await page.waitForTimeout(500);
       const messages = await this.scrapeVisibleMessages(page, conversationId, 100);
-      const sent = [...messages].reverse().find((message) => message.content === input.content);
+      const scraped = [...messages].reverse().find((message) => message.content === input.content);
+      const sent = scraped ? { ...scraped, author: { ...scraped.author, id: "me" } } : undefined;
       if (!sent) {
         throw new AppError("Discord accepted the send action, but the new message could not be read", 502, "DISCORD_READ_FAILED");
       }

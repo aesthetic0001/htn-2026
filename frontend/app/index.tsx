@@ -1,9 +1,11 @@
 import { SymbolView } from 'expo-symbols';
-import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
   TextInput,
@@ -13,34 +15,17 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/Avatar';
-import {
-  conversations,
-  getLatestMessage,
-  providerColors,
-  providerLabels,
-} from '@/data/messages';
-import type { Conversation } from '@/types/messaging';
+import { providerColors, providerLabels } from '@/data/messages';
+import { connectProvider, errorMessage, getConversations, getProviders } from '@/services/api';
+import type { Conversation, ProviderName, ProviderStatus } from '@/types/messaging';
 
 const INK = '#242320';
 const MUTED = '#7B776F';
 const PAPER = '#F6F3EC';
 const ACCENT = '#B44D32';
-
-function formatTimestamp(value?: string) {
-  if (!value) return '';
-
-  const date = new Date(value);
-  const today = new Date();
-  const sameDay = date.toDateString() === today.toDateString();
-
-  return sameDay
-    ? new Intl.DateTimeFormat('en', { hour: 'numeric', minute: '2-digit' }).format(date)
-    : new Intl.DateTimeFormat('en', { weekday: 'short' }).format(date);
-}
+const POLL_INTERVAL_MS = 15_000;
 
 function ConversationRow({ conversation }: { conversation: Conversation }) {
-  const latestMessage = getLatestMessage(conversation.id);
-
   return (
     <Pressable
       accessibilityRole="button"
@@ -49,29 +34,22 @@ function ConversationRow({ conversation }: { conversation: Conversation }) {
       style={({ pressed }) => [styles.conversationRow, pressed && styles.rowPressed]}>
       <View>
         <Avatar name={conversation.title} imageUrl={conversation.avatarUrl} size={52} />
-        <View
-          style={[
-            styles.providerDot,
-            { backgroundColor: providerColors[conversation.provider] },
-          ]}
-        />
+        <View style={[styles.providerDot, { backgroundColor: providerColors[conversation.provider] }]} />
       </View>
 
       <View style={styles.conversationCopy}>
         <View style={styles.rowTopLine}>
           <Text numberOfLines={1} style={[styles.conversationTitle, conversation.unread && styles.unreadText]}>
-            {conversation.kind === 'channel' ? '# ' : ''}
             {conversation.title}
           </Text>
-          <Text style={[styles.time, conversation.unread && styles.unreadTime]}>
-            {formatTimestamp(latestMessage?.sentAt)}
+          <Text style={[styles.providerName, conversation.unread && styles.unreadTime]}>
+            {providerLabels[conversation.provider]}
           </Text>
         </View>
 
         <View style={styles.rowBottomLine}>
           <Text numberOfLines={1} style={[styles.preview, conversation.unread && styles.unreadPreview]}>
-            {latestMessage?.author.id === 'me' ? 'You: ' : ''}
-            {latestMessage?.content ?? 'No messages yet'}
+            {conversation.kind === 'group' ? 'Group conversation' : 'Direct message'}
           </Text>
           {conversation.unread ? <View style={styles.unreadDot} /> : null}
         </View>
@@ -80,25 +58,102 @@ function ConversationRow({ conversation }: { conversation: Conversation }) {
   );
 }
 
+function SourceStatus({ status, onConnect }: { status: ProviderStatus; onConnect: (name: ProviderName) => void }) {
+  const canConnect = status.state === 'error' || status.state === 'disconnected';
+  return (
+    <Pressable
+      accessibilityRole={canConnect ? 'button' : undefined}
+      disabled={!canConnect}
+      onPress={() => onConnect(status.name)}
+      style={styles.sourceStatus}>
+      <View
+        style={[
+          styles.sourceDot,
+          { backgroundColor: status.state === 'connected' ? '#47835D' : status.state === 'error' ? ACCENT : '#A39D93' },
+        ]}
+      />
+      <Text style={styles.sourceText}>
+        {providerLabels[status.name]} · {status.state}{canConnect ? ' — tap to connect' : ''}
+      </Text>
+    </Pressable>
+  );
+}
+
 export default function InboxScreen() {
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [connecting, setConnecting] = useState<ProviderName>();
+  const [loadError, setLoadError] = useState<string>();
+  const requestInFlight = useRef(false);
+  const mounted = useRef(true);
   const { width } = useWindowDimensions();
+
+  const loadData = useCallback(async (showRefresh = false) => {
+    if (requestInFlight.current) return;
+    requestInFlight.current = true;
+    if (showRefresh) setRefreshing(true);
+
+    try {
+      const [nextProviders, nextConversations] = await Promise.all([getProviders(), getConversations()]);
+      if (!mounted.current) return;
+      setProviders(nextProviders);
+      setConversations(nextConversations);
+      setLoadError(undefined);
+    } catch (error) {
+      if (mounted.current) setLoadError(errorMessage(error));
+    } finally {
+      requestInFlight.current = false;
+      if (mounted.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, []);
+
+  useFocusEffect(useCallback(() => {
+    mounted.current = true;
+    const initialLoad = setTimeout(() => void loadData(), 0);
+    const poller = setInterval(() => void loadData(), POLL_INTERVAL_MS);
+    return () => {
+      mounted.current = false;
+      clearTimeout(initialLoad);
+      clearInterval(poller);
+    };
+  }, [loadData]));
+
+  const handleConnect = useCallback(async (provider: ProviderName) => {
+    setConnecting(provider);
+    setLoadError(undefined);
+    try {
+      await connectProvider(provider);
+      await loadData();
+    } catch (error) {
+      setLoadError(errorMessage(error));
+    } finally {
+      if (mounted.current) setConnecting(undefined);
+    }
+  }, [loadData]);
 
   const visibleConversations = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-
     return conversations.filter((conversation) => {
       const matchesFilter = filter === 'all' || conversation.unread;
-      const matchesQuery =
-        !normalizedQuery ||
-        conversation.title.toLowerCase().includes(normalizedQuery) ||
-        providerLabels[conversation.provider].toLowerCase().includes(normalizedQuery) ||
-        conversation.guild?.toLowerCase().includes(normalizedQuery);
-
+      const matchesQuery = !normalizedQuery
+        || conversation.title.toLowerCase().includes(normalizedQuery)
+        || providerLabels[conversation.provider].toLowerCase().includes(normalizedQuery);
       return matchesFilter && matchesQuery;
     });
-  }, [filter, query]);
+  }, [conversations, filter, query]);
+
+  const emptyCopy = loadError
+    ? 'Check that the backend is running and that EXPO_PUBLIC_API_URL points to it.'
+    : providers.length === 0
+      ? 'Add Discord or Instagram credentials to backend/.env, then restart Providence.'
+      : 'No conversations match this view yet.';
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
@@ -110,22 +165,29 @@ export default function InboxScreen() {
           </View>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Start a new message"
-            style={({ pressed }) => [styles.composeButton, pressed && styles.buttonPressed]}>
-            <SymbolView
-              name={{ ios: 'square.and.pencil', android: 'edit_square', web: 'edit_square' }}
-              size={20}
-              tintColor={PAPER}
-            />
+            accessibilityLabel="Refresh conversations"
+            onPress={() => void loadData(true)}
+            style={({ pressed }) => [styles.refreshButton, pressed && styles.buttonPressed]}>
+            <SymbolView name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }} size={20} tintColor={PAPER} />
           </Pressable>
         </View>
 
+        {providers.length ? (
+          <View style={styles.sources}>
+            {providers.map((provider) => <SourceStatus key={provider.name} status={provider} onConnect={handleConnect} />)}
+            {connecting ? <ActivityIndicator color={ACCENT} size="small" /> : null}
+          </View>
+        ) : null}
+
+        {loadError ? (
+          <Pressable accessibilityRole="button" onPress={() => void loadData(true)} style={styles.errorBanner}>
+            <Text numberOfLines={2} style={styles.errorText}>{loadError}</Text>
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        ) : null}
+
         <View style={styles.searchWrap}>
-          <SymbolView
-            name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
-            size={18}
-            tintColor={MUTED}
-          />
+          <SymbolView name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }} size={18} tintColor={MUTED} />
           <TextInput
             accessibilityLabel="Search messages"
             onChangeText={setQuery}
@@ -141,10 +203,7 @@ export default function InboxScreen() {
           {(['all', 'unread'] as const).map((item) => {
             const active = item === filter;
             return (
-              <Pressable
-                key={item}
-                onPress={() => setFilter(item)}
-                style={[styles.filterChip, active && styles.filterChipActive]}>
+              <Pressable key={item} onPress={() => setFilter(item)} style={[styles.filterChip, active && styles.filterChipActive]}>
                 <Text style={[styles.filterText, active && styles.filterTextActive]}>
                   {item === 'all' ? 'All messages' : 'Unread'}
                 </Text>
@@ -154,7 +213,7 @@ export default function InboxScreen() {
         </View>
 
         <View style={styles.listHeadingRow}>
-          <Text style={styles.listHeading}>{filter === 'all' ? 'Recent' : 'Unread'}</Text>
+          <Text style={styles.listHeading}>{filter === 'all' ? 'Conversations' : 'Unread'}</Text>
           <Text style={styles.count}>{visibleConversations.length}</Text>
         </View>
 
@@ -164,12 +223,13 @@ export default function InboxScreen() {
           ItemSeparatorComponent={() => <View style={styles.separator} />}
           keyExtractor={(item) => item.id}
           keyboardShouldPersistTaps="handled"
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadData(true)} tintColor={ACCENT} />}
           renderItem={({ item }) => <ConversationRow conversation={item} />}
           showsVerticalScrollIndicator={false}
           ListEmptyComponent={
             <View style={styles.emptyState}>
-              <Text style={styles.emptyTitle}>All quiet here</Text>
-              <Text style={styles.emptyBody}>Try another search or switch back to all messages.</Text>
+              {loading ? <ActivityIndicator color={ACCENT} /> : <Text style={styles.emptyTitle}>All quiet here</Text>}
+              {!loading ? <Text style={styles.emptyBody}>{emptyCopy}</Text> : null}
             </View>
           }
         />
@@ -182,83 +242,38 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: PAPER },
   page: { flex: 1, width: '100%', alignSelf: 'center' },
   pageWide: { maxWidth: 680 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingTop: 22,
-    paddingBottom: 22,
-  },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 24, paddingTop: 22, paddingBottom: 16 },
   eyebrow: { color: ACCENT, fontSize: 11, fontWeight: '800', letterSpacing: 2.1, marginBottom: 6 },
   heading: { color: INK, fontSize: 34, fontWeight: '700', letterSpacing: -1.2 },
-  composeButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: INK,
-  },
+  refreshButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: INK },
   buttonPressed: { opacity: 0.72, transform: [{ scale: 0.97 }] },
-  searchWrap: {
-    height: 50,
-    marginHorizontal: 24,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#DED9CF',
-    borderRadius: 15,
-    backgroundColor: '#FFFCF6',
-  },
+  sources: { minHeight: 28, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 10, paddingHorizontal: 24, paddingBottom: 14 },
+  sourceStatus: { flexDirection: 'row', alignItems: 'center' },
+  sourceDot: { width: 7, height: 7, borderRadius: 4, marginRight: 6 },
+  sourceText: { color: MUTED, fontSize: 11, fontWeight: '600' },
+  errorBanner: { marginHorizontal: 24, marginBottom: 12, paddingHorizontal: 13, paddingVertical: 10, borderRadius: 10, backgroundColor: '#F3DDD5', flexDirection: 'row', alignItems: 'center', gap: 10 },
+  errorText: { flex: 1, color: '#733520', fontSize: 12, lineHeight: 17 },
+  retryText: { color: '#733520', fontSize: 12, fontWeight: '800' },
+  searchWrap: { height: 50, marginHorizontal: 24, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#DED9CF', borderRadius: 15, backgroundColor: '#FFFCF6' },
   searchInput: { flex: 1, height: '100%', marginLeft: 10, color: INK, fontSize: 15 },
   filters: { flexDirection: 'row', gap: 8, paddingHorizontal: 24, paddingTop: 16 },
-  filterChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: '#EAE5DC',
-  },
+  filterChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: '#EAE5DC' },
   filterChipActive: { backgroundColor: '#D7C0B4' },
   filterText: { color: MUTED, fontSize: 13, fontWeight: '600' },
   filterTextActive: { color: '#733520' },
-  listHeadingRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 28,
-    paddingBottom: 10,
-  },
+  listHeadingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 24, paddingTop: 28, paddingBottom: 10 },
   listHeading: { color: MUTED, fontSize: 12, fontWeight: '800', letterSpacing: 1.4, textTransform: 'uppercase' },
   count: { color: MUTED, fontSize: 12, fontWeight: '700' },
   listContent: { paddingHorizontal: 16, paddingBottom: 30, flexGrow: 1 },
-  conversationRow: {
-    minHeight: 82,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 14,
-    borderRadius: 14,
-  },
+  conversationRow: { minHeight: 82, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 14, borderRadius: 14 },
   rowPressed: { backgroundColor: '#ECE7DE' },
-  providerDot: {
-    position: 'absolute',
-    right: -1,
-    bottom: -1,
-    width: 15,
-    height: 15,
-    borderRadius: 8,
-    borderWidth: 3,
-    borderColor: PAPER,
-  },
+  providerDot: { position: 'absolute', right: -1, bottom: -1, width: 15, height: 15, borderRadius: 8, borderWidth: 3, borderColor: PAPER },
   conversationCopy: { flex: 1, marginLeft: 14, gap: 7 },
   rowTopLine: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   rowBottomLine: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   conversationTitle: { flex: 1, color: INK, fontSize: 16, fontWeight: '600', letterSpacing: -0.25 },
   unreadText: { fontWeight: '800' },
-  time: { color: MUTED, fontSize: 12 },
+  providerName: { color: MUTED, fontSize: 12 },
   unreadTime: { color: ACCENT, fontWeight: '700' },
   preview: { flex: 1, color: MUTED, fontSize: 14, lineHeight: 18 },
   unreadPreview: { color: '#4E4B46', fontWeight: '500' },

@@ -27,7 +27,7 @@ export function createApp(providerInput: EventProvider | readonly EventProvider[
   app.get("/health", (_request, response) => {
     const statuses = providers.map((provider) => ({ name: provider.name, ...provider.status() }));
     response.json({
-      status: statuses.every(({ state }) => state === "connected") ? "ok" : "degraded",
+      status: statuses.length > 0 && statuses.every(({ state }) => state === "connected") ? "ok" : "degraded",
       providers: statuses,
     });
   });

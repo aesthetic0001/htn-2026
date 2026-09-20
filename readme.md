@@ -2,6 +2,30 @@
 
 centralized messaging platform
 
+## run the app
+
+Install each side once:
+
+```bash
+npm --prefix backend install
+npm --prefix frontend install
+```
+
+Copy `backend/.env.example` to `backend/.env`, then configure a complete Discord and/or Instagram credential pair as described in [the backend guide](backend/README.md). Start the API and Expo app together from the repository root:
+
+```bash
+npm run dev
+```
+
+The Expo app calls `http://localhost:3001` by default (`http://10.0.2.2:3001` on the Android emulator). For a physical device, copy `frontend/.env.example` to `frontend/.env.local`, replace `localhost` with the computer's LAN IP address, and set `HOST=0.0.0.0` in `backend/.env`. Never put provider credentials in an `EXPO_PUBLIC_` variable—the frontend bundle is public.
+
+Useful verification commands:
+
+```bash
+npm test
+npm run build
+```
+
 ## problem statement
 
 suppose you usually use some social media platform. you talk to *most* of your friends here, but then you meet other people who only use other platforms. this forces you to install another app just to talk to them. wouldn't it be nice if all messages were available to you on one centralized single platform for you?
