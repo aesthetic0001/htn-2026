@@ -4,6 +4,7 @@ import {
   classifyInstagramLoginState,
   instagramThreadRowProviderId,
   normalizeInstagramConversationTitle,
+  normalizeInstagramTimestamp,
 } from "../src/instagram-provider.js";
 
 test("recognizes current Instagram login outcomes", () => {
@@ -47,4 +48,31 @@ test("gives linkless Instagram thread rows a stable identity without opening the
 
   assert.match(first, /^row-[a-f0-9]{24}$/);
   assert.equal(second, first);
+});
+
+test("normalizes Instagram date-bar timestamps without inventing missing times", () => {
+  const reference = new Date(2026, 8, 20, 10, 30);
+
+  assert.equal(
+    normalizeInstagramTimestamp("00:07", reference),
+    new Date(2026, 8, 20, 0, 7).toISOString(),
+  );
+  assert.equal(
+    normalizeInstagramTimestamp("2:13 PM", reference),
+    new Date(2026, 8, 20, 14, 13).toISOString(),
+  );
+  assert.equal(
+    normalizeInstagramTimestamp("Yesterday, 2:13 AM", reference),
+    new Date(2026, 8, 19, 2, 13).toISOString(),
+  );
+  assert.equal(
+    normalizeInstagramTimestamp("Sat 11:59 PM", reference),
+    new Date(2026, 8, 19, 23, 59).toISOString(),
+  );
+  assert.equal(
+    normalizeInstagramTimestamp("Sep 18, 2026, 2:13 AM", reference),
+    new Date(2026, 8, 18, 2, 13).toISOString(),
+  );
+  assert.equal(normalizeInstagramTimestamp(undefined, reference), undefined);
+  assert.equal(normalizeInstagramTimestamp("not a timestamp", reference), undefined);
 });

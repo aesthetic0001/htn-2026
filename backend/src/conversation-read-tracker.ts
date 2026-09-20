@@ -45,7 +45,7 @@ export class ConversationReadTracker {
     if (!state.messagesInitialized) {
       state.messagesInitialized = true;
       state.latestIncomingMessageId = latestIncoming.id;
-      state.lastUpdatedAt ??= latestIncoming.sentAt;
+      if (latestIncoming.sentAt) state.lastUpdatedAt ??= latestIncoming.sentAt;
       return false;
     }
     if (latestIncoming.id === state.latestIncomingMessageId) return false;

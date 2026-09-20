@@ -287,7 +287,7 @@ async function listMergedMessages(
     providerForQualifiedId(providers, conversationId).listMessages(conversationId, limit, acknowledge),
   ));
   return messageLists.flat()
-    .sort((left, right) => Date.parse(left.sentAt) - Date.parse(right.sentAt))
+    .sort((left, right) => messageTimestamp(left) - messageTimestamp(right))
     .slice(-limit);
 }
 
@@ -306,11 +306,16 @@ async function selectSendConversation(
   const usage = await Promise.all(availableIds.map(async (conversationId, order) => {
     const messages = await providerForQualifiedId(providers, conversationId)
       .listMessages(conversationId, 100, false);
-    const latest = messages.reduce((timestamp, message) => Math.max(timestamp, Date.parse(message.sentAt) || 0), 0);
+    const latest = messages.reduce((timestamp, message) => Math.max(timestamp, messageTimestamp(message)), 0);
     return { conversationId, count: messages.length, latest, order };
   }));
   usage.sort((left, right) => right.count - left.count || right.latest - left.latest || left.order - right.order);
   return usage[0]!.conversationId;
+}
+
+function messageTimestamp(message: Message): number {
+  const timestamp = message.sentAt ? Date.parse(message.sentAt) : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function availableConversationIds(

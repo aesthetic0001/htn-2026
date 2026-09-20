@@ -115,7 +115,12 @@ export async function getMessages(conversationId: string, limit = 100, acknowled
     `/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=${limit}&acknowledge=${acknowledge}`,
   );
   return body.messages.sort((left, right) =>
-    new Date(left.sentAt).getTime() - new Date(right.sentAt).getTime());
+    messageTimestamp(left) - messageTimestamp(right));
+}
+
+function messageTimestamp(message: Message): number {
+  const timestamp = message.sentAt ? Date.parse(message.sentAt) : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 export async function sendMessage(

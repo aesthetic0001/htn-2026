@@ -85,6 +85,7 @@ const LOGIN_SUBMIT_SELECTOR = [
   'input[type="submit"]',
 ].map((selector) => `${selector}:visible`).join(", ");
 const ID_MESSAGE_SELECTOR = "main [data-message-id]";
+const ARTICLE_MESSAGE_SELECTOR = 'main [role="article"]';
 const ROW_MESSAGE_SELECTOR = 'main [role="row"]';
 const TEXT_MESSAGE_SELECTOR = 'main div[dir="auto"]';
 
@@ -524,11 +525,11 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
     const messages: Message[] = [];
 
     for (const raw of rawMessages) {
+      const sentAt = normalizeInstagramTimestamp(raw.timestamp);
       const fingerprint = JSON.stringify([
         conversationId,
         raw.author,
         raw.content,
-        raw.timestamp,
         raw.attachments.map(({ name, contentType }) => [name, contentType]),
       ]);
       const ordinal = duplicateOrdinals.get(fingerprint) ?? 0;
@@ -548,7 +549,7 @@ export class InstagramProvider extends EventEmitter implements MessageProvider {
           ...(raw.avatarUrl ? { avatarUrl: raw.avatarUrl } : {}),
         },
         content: raw.content,
-        sentAt: normalizeTimestamp(raw.timestamp),
+        ...(sentAt ? { sentAt } : {}),
         edited: raw.edited,
         attachments: raw.attachments,
         reactions: raw.reactions,
@@ -675,18 +676,44 @@ export function classifyInstagramLoginState(pathname: string, visibleText: strin
 
 async function extractVisibleInstagramMessages(page: Page, conversationTitle: string): Promise<RawInstagramMessage[]> {
   const idMessageCount = await page.locator(ID_MESSAGE_SELECTOR).count();
-  const rowCount = idMessageCount === 0 ? await page.locator(ROW_MESSAGE_SELECTOR).count() : 0;
+  const articleMessageCount = idMessageCount === 0 ? await page.locator(ARTICLE_MESSAGE_SELECTOR).count() : 0;
+  const rowCount = idMessageCount === 0 && articleMessageCount === 0
+    ? await page.locator(ROW_MESSAGE_SELECTOR).count()
+    : 0;
   const selector = idMessageCount > 0
     ? ID_MESSAGE_SELECTOR
-    : rowCount > 0
-      ? ROW_MESSAGE_SELECTOR
-      : TEXT_MESSAGE_SELECTOR;
+    : articleMessageCount > 0
+      ? ARTICLE_MESSAGE_SELECTOR
+      : rowCount > 0
+        ? ROW_MESSAGE_SELECTOR
+        : TEXT_MESSAGE_SELECTOR;
   return page.locator(selector).evaluateAll((nodes, options) => {
     const { title, selector: sourceSelector } = options;
     const main = document.querySelector("main")?.getBoundingClientRect();
     const ignoredText = /^(?:active (?:now|\d+[mhd] ago)|seen|sent|delivered|view profile|loading|message)$/i;
+    const clockAtEnd = /(?:^|[\s,])\d{1,2}:\d{2}(?:\s*[AP]\.?M\.?)?$/i;
     const results: RawInstagramMessage[] = [];
+    const messageElements = new Set(nodes as HTMLElement[]);
+    const timestampLabels = new Map<HTMLElement, string>();
+    let currentTimestampLabel: string | undefined;
     let lastIncomingAuthor = title;
+
+    // Instagram renders a timestamp separator before each message group. It is a
+    // sibling of the message articles, not a descendant, so capture the active
+    // separator while walking the thread once in document order.
+    for (const candidate of document.querySelectorAll("main *")) {
+      const element = candidate as HTMLElement;
+      if (messageElements.has(element)) timestampLabels.set(element, currentTimestampLabel ?? "");
+      if (
+        element.tagName === "SPAN"
+        && element.getAttribute("dir") === "auto"
+        && element.children.length === 0
+        && !element.closest('[data-message-id], [role="article"], [role="row"]')
+      ) {
+        const value = (element.innerText || element.textContent || "").trim();
+        if (clockAtEnd.test(value)) currentTimestampLabel = value;
+      }
+    }
 
     nodes.forEach((node, index) => {
       const element = node as HTMLElement;
@@ -729,6 +756,7 @@ async function extractVisibleInstagramMessages(page: Page, conversationTitle: st
       if (!outgoing && profileName) lastIncomingAuthor = profileName;
       const timestamp = element.querySelector("time")?.getAttribute("datetime")
         || element.closest("[title]")?.getAttribute("title")
+        || timestampLabels.get(element)
         || undefined;
       const attachments = media.flatMap((item, mediaIndex) => {
         const mediaElement = item as HTMLImageElement | HTMLVideoElement | HTMLAudioElement;
@@ -807,10 +835,60 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function normalizeTimestamp(value: string | undefined): string {
-  if (value) {
-    const parsed = Date.parse(value);
-    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+export function normalizeInstagramTimestamp(
+  value: string | undefined,
+  referenceDate = new Date(),
+): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.replace(/\u00a0/g, " ").trim();
+  const directlyParsed = Date.parse(normalized);
+  if (Number.isFinite(directlyParsed) && /\b\d{4}\b/.test(normalized)) {
+    return new Date(directlyParsed).toISOString();
   }
-  return new Date().toISOString();
+
+  const timeMatch = normalized.match(/(\d{1,2}):(\d{2})(?:\s*([AP])\.?M\.?)?$/i);
+  if (!timeMatch) return undefined;
+  let hour = Number.parseInt(timeMatch[1]!, 10);
+  const minute = Number.parseInt(timeMatch[2]!, 10);
+  const meridiem = timeMatch[3]?.toUpperCase();
+  if (minute > 59 || hour > (meridiem ? 12 : 23) || hour === 0 && meridiem) return undefined;
+  if (meridiem) {
+    hour %= 12;
+    if (meridiem === "P") hour += 12;
+  }
+
+  const prefix = normalized.slice(0, timeMatch.index).replace(/[\s,]+$/g, "").trim();
+  const result = new Date(referenceDate);
+  result.setSeconds(0, 0);
+
+  if (!prefix || /^today$/i.test(prefix)) {
+    result.setHours(hour, minute, 0, 0);
+    return result.toISOString();
+  }
+  if (/^yesterday$/i.test(prefix)) {
+    result.setDate(result.getDate() - 1);
+    result.setHours(hour, minute, 0, 0);
+    return result.toISOString();
+  }
+
+  const weekday = prefix.match(/^(sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)$/i);
+  if (weekday) {
+    const names = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+    const targetDay = names.indexOf(weekday[1]!.slice(0, 3).toLowerCase());
+    result.setDate(result.getDate() - (result.getDay() - targetDay + 7) % 7);
+    result.setHours(hour, minute, 0, 0);
+    if (result.getTime() > referenceDate.getTime()) result.setDate(result.getDate() - 7);
+    return result.toISOString();
+  }
+
+  const dateOnly = Date.parse(/\b\d{4}\b/.test(prefix)
+    ? prefix
+    : `${prefix}, ${referenceDate.getFullYear()}`);
+  if (!Number.isFinite(dateOnly)) return undefined;
+  result.setTime(dateOnly);
+  result.setHours(hour, minute, 0, 0);
+  if (!/\b\d{4}\b/.test(prefix) && result.getTime() > referenceDate.getTime()) {
+    result.setFullYear(result.getFullYear() - 1);
+  }
+  return result.toISOString();
 }

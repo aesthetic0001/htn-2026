@@ -70,7 +70,7 @@ export interface Message {
   conversationId: string;
   author: Participant;
   content: string;
-  sentAt: string;
+  sentAt?: string;
   edited: boolean;
   attachments: Attachment[];
   reactions: Array<{ emoji: string; count?: number }>;

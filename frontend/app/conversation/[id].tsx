@@ -55,6 +55,9 @@ function MessageItem({
   showProvider: boolean;
 }) {
   const mine = message.author.id === currentUser.id || message.author.displayName === currentUser.displayName;
+  const metadata = [message.sentAt ? messageTime(message.sentAt) : undefined, message.edited ? 'edited' : undefined]
+    .filter(Boolean)
+    .join(' · ');
 
   return (
     <View style={[styles.messageRow, mine && styles.messageRowMine]}>
@@ -79,9 +82,9 @@ function MessageItem({
             </Pressable>
           ))}
 
-          <Text style={[styles.messageTime, mine && styles.messageTimeMine]}>
-            {messageTime(message.sentAt)}{message.edited ? ' · edited' : ''}
-          </Text>
+          {metadata ? (
+            <Text style={[styles.messageTime, mine && styles.messageTimeMine]}>{metadata}</Text>
+          ) : null}
         </View>
 
         {message.reactions.length ? (
