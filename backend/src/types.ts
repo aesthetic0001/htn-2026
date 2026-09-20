@@ -14,6 +14,9 @@ export interface Conversation {
   kind: "direct" | "group";
   avatarUrl?: string;
   unread: boolean;
+  muted: boolean;
+  participantCount?: number;
+  presence?: "online" | "idle" | "do_not_disturb" | "offline";
 }
 
 export interface Attachment {

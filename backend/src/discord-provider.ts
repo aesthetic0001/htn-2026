@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type { BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { AsyncLock } from "./async-lock.js";
+import { normalizeDiscordConversationTitle } from "./discord-conversation-title.js";
 import { AppError, errorMessage } from "./errors.js";
 import type {
   Conversation,
@@ -218,13 +219,27 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         const label = anchor.getAttribute("aria-label") || anchor.textContent?.trim() || `Discord ${match[1]}`;
         const image = anchor.querySelector("img") as HTMLImageElement | null;
         const text = anchor.textContent || label;
+        const participantCount = text.match(/\b(\d+)\s+members?\b/i)?.[1];
+        const presence = label.match(/,\s*(online|idle|offline|invisible|do not disturb)(?=\s*,|\s*$)/i)?.[1]
+          ?.toLowerCase();
         return [{
           channelId: match[1],
           path,
           label,
           avatarUrl: image?.src,
-          kind: /\b\d+\s+members?\b/i.test(text) ? "group" as const : "direct" as const,
+          kind: participantCount || /(?:\(|,\s*)group (?:message|chat)\b/i.test(label)
+            ? "group" as const
+            : "direct" as const,
           unread: /\bunread\b/i.test(label),
+          muted: /\bmuted\b/i.test(label),
+          participantCount: participantCount ? Number.parseInt(participantCount, 10) : undefined,
+          presence: presence === "do not disturb"
+            ? "do_not_disturb" as const
+            : presence === "online" || presence === "idle"
+              ? presence
+              : presence === "offline" || presence === "invisible"
+                ? "offline" as const
+                : undefined,
         }];
       }),
     );
@@ -235,10 +250,13 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
         id,
         provider: "discord",
         providerConversationId: link.channelId,
-        title: cleanLabel(link.label),
+        title: normalizeDiscordConversationTitle(link.label),
         kind: link.kind,
         avatarUrl: link.avatarUrl,
         unread: link.unread,
+        muted: link.muted,
+        participantCount: link.participantCount,
+        presence: link.presence as Conversation["presence"],
         path: link.path,
       });
     }
@@ -423,13 +441,6 @@ export class DiscordProvider extends EventEmitter implements MessageProvider {
       data,
     } satisfies ProvidenceEvent);
   }
-}
-
-function cleanLabel(label: string): string {
-  return label
-    .replace(/,?\s*\d+\s+members?\b/gi, "")
-    .replace(/,?\s*(unread|selected)$/gi, "")
-    .trim();
 }
 
 function escapeRegExp(value: string): string {

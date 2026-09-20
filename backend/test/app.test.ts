@@ -12,6 +12,7 @@ const conversation: Conversation = {
   title: "Friends",
   kind: "direct",
   unread: false,
+  muted: false,
 };
 
 const message: Message = {
